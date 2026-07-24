@@ -1,19 +1,4 @@
-"""
-Single-variant IV-loss ablation for AudioSphere:
-    loss = MSE(mel channels)  +  (1 - cos) on intensity vectors.
-
-Drop regime, original pipeline — ONLY the loss changes. The MSE control is the
-plain AudioSphere mask_random run; do not retrain a control with this class.
-
-Notes that make this defensible:
-  * Direction is computed on DE-NORMALIZED IVs. spectrogram_normalize is
-    LayerNorm over [C, F, T] with one per-sample (mu, sigma) shared across all
-    channels; subtracting a shared scalar changes a 3-vector's angle, so
-    cosine in the normalized domain would not measure direction.
-  * Near-silent pixels (target IV norm < dir_eps) have undefined direction and
-    are excluded; the excluded fraction is logged every step.
-"""
-
+from .AudioSphere import AudioSphere 
 from typing import List, Tuple
 
 import torch
@@ -59,11 +44,6 @@ def layernorm_stats(x: torch.Tensor, eps: float = 1e-5):
     var = x.var(dim=(1, 2, 3), unbiased=False, keepdim=True)
     return mu, torch.sqrt(var + eps)
 
-
-try:
-    from .audiosphere import AudioSphere          # adjust to your package path
-except Exception:
-    AudioSphere = object                          # standalone import/testing
 
 class AudioSphereIVCosine(AudioSphere):
     """AudioSphere with loss = mel MSE + IV cosine. Nothing else differs."""

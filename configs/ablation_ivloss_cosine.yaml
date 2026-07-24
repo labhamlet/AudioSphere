@@ -1,11 +1,11 @@
 # Rebuttal ablation: mel MSE + IV cosine — launch like base.yaml; 50k steps.
 # MSE control == the mask_random run (task 2); do not retrain a control.
 defaults:
-  - data: audioset_ambisonics
-  - optimizer: adamW
-  - trainer: default_trainer
-  - patching: frame_paper
-  - masking: random
+  - /data: audioset_ambisonics
+  - /optimizer: adamW
+  - /trainer: default_trainer
+  - /patching: frame
+  - /masking: random
   - _self_
 
 model: AudioSphereIVCosine

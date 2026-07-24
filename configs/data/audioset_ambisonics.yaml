@@ -9,7 +9,7 @@ sr: 32000
 in_channels: 7
 input_length: 1024
 target_length: 200
-samples_per_audio: 16
+samples_per_audio: 8
 
 mask_patch: 160
 cluster: False

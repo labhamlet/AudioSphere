@@ -1,5 +1,6 @@
 import random
 from typing import List, Optional, Tuple
+from .AudioSphere import AudioSphere 
 
 import torch
 from torch import nn
@@ -95,13 +96,6 @@ def channelwise_masked_loss(
     return (loss * m).sum() / m.sum().clamp_min(1.0)
 
 
-
-AUDIOSPHERE_AVAILABLE = True
-try:
-    from .audiosphere import AudioSphere 
-except Exception:
-    AUDIOSPHERE_AVAILABLE = False
-    AudioSphere = object 
 
 class AudioSphereChannelMasked(AudioSphere):
     """

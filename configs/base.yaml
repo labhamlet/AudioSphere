@@ -1,8 +1,9 @@
 defaults:
-  - data: audioset
+  - data: audioset_ambisonics
   - optimizer: adamW
   - trainer: default_trainer
-  - patching: frame
+  - patching: frame 
+  - masking: random
 
 model: AudioSphere
 model_size: base

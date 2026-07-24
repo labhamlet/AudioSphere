@@ -1,14 +1,21 @@
 import glob
 
-import pytorch_lightning as pl
+def _san(value):
+    """Path-safe token value: no '_' (train.py's separator), no '/'."""
+    return str(value).replace("_", "-").replace("/", "-")
 
-from src.model import GRAMT
-from src.patching import PatchStrategy
 
-networks = {"GRAM-T": GRAMT}
+def _resolved_mask_patch(cfg):
+    """Same resolution rule as train.py: prefer the masking group, fall back
+    to data.mask_patch. Legacy configs have no masking group -> unchanged."""
+    mask_cfg = cfg.get("masking", None)
+    if mask_cfg is not None:
+        return mask_cfg.get("mask_patch", cfg.data.mask_patch)
+    return cfg.data.mask_patch
 
 
 def get_identity_from_cfg(cfg):
+    # ---- legacy core: DO NOT REORDER (existing checkpoints depend on it) ---
     identity = "InChannels={}_Fraction={}_CleanDataFraction={}_".format(
         cfg.data.get("in_channels"),
         cfg.data.get("data_ratio"),
@@ -23,43 +30,44 @@ def get_identity_from_cfg(cfg):
         cfg.data.get("samples_per_audio"),
     )
     identity += "Patching={}_MaskPatch={}_InputL={}_Cluster={}".format(
-        cfg.patching.get("name"),
-        cfg.data.mask_patch,
+        _san(cfg.patching.get("name")),
+        _resolved_mask_patch(cfg),
         cfg.data.target_length,
         cfg.data.cluster,
     )
+
+    # ---- ablation tokens: appended ONLY when the keys exist ---------------
+    mask_cfg = cfg.get("masking", None)
+    mask_mode = mask_cfg.get("mask_mode", None) if mask_cfg is not None else None
+    if mask_mode not in (None, "random"):          # random == legacy behavior
+        identity += "_MaskMode={}".format(_san(mask_mode))
+
+    if cfg.model == "AudioSphereChannelMasked":
+        identity += "_ChannelMask={}_Indicator={}".format(
+            _san(cfg.get("channel_mask_mode", "tube")),
+            cfg.get("add_mask_indicator", True),
+        )
+    elif cfg.model == "AudioSphereIVCosine":
+        identity += "_IVLoss=cosine"
+
     return identity
 
 
-def find_network_form_cfg(cfg, step):
+def get_save_paths(cfg):
+    """Single source of truth for where a run logs and checkpoints.
+    Returns dict(identity, run_name, log_dir, ckpt_dir)."""
     identity = get_identity_from_cfg(cfg)
-    PATH = None
-    if cfg.fine_tuning.pre_trained_model:
-        if step == "last":
-            PATH = f"/projects/0/prjs1338/saved_models/{identity.replace('_', '/')}/last.ckpt"
-        else:
-            PATHs = glob.glob(
-                f"/projects/0/prjs1338/saved_models/{identity.replace('_', '/')}/*.ckpt"
-            )
-            PATH = [PATH for PATH in PATHs if f"step={int(step)}" in PATH][0]
+    nested = identity.replace("_", "/")
+    if cfg.data.in_channels == 7:
+        log_dir = f"{cfg.save_dir}/audio_sphere"
+        ckpt_dir = f"{cfg.save_dir}/audio_sphere/{nested}"
+    else:
+        log_dir = f"{cfg.save_dir}/tb_logs_naturalistic_mixing"
+        ckpt_dir = f"{cfg.save_dir}/saved_models_naturalistic_mixing/{nested}"
+    return {
+        "identity": identity,
+        "run_name": nested,
+        "log_dir": log_dir,
+        "ckpt_dir": ckpt_dir,
+    }
 
-        print(f"LOADING THE MODEL WITH PATH: {PATH}")
-    Network: pl.LightningModule = networks[cfg.model]
-    network_instance = Network(
-        model_size=cfg.model_size,
-        lr=cfg.optimizer.lr,
-        trainer=cfg.optimizer.name,
-        b1=cfg.optimizer.b1,
-        b2=cfg.optimizer.b2,
-        weight_decay=cfg.optimizer.weight_decay,
-        patch_strategy=PatchStrategy(
-            input_tdim=cfg.data.target_length,
-            input_fdim=cfg.data.num_mel_bins,
-            tstride=cfg.masking.tstride,
-            tshape=cfg.masking.tshape,
-            fstride=cfg.masking.fstride,
-            fshape=cfg.masking.fshape,
-        ),
-        mask_patch=cfg.data.mask_patch,
-    )
-    return network_instance, PATH

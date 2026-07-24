@@ -1,19 +1,19 @@
-# Rebuttal ablation: chan_independent — launch like base.yaml (hydra root); 50k steps.
+# Rebuttal ablation: chan_mel2iv — launch like base.yaml (hydra root); 50k steps.
 defaults:
-  - data: audioset_ambisonics
-  - optimizer: adamW
-  - trainer: default_trainer
-  - patching: frame_paper        # 200-token grid; budget rule in masking/*.yaml
-  - masking: random
+  - /data: audioset_ambisonics
+  - /optimizer: adamW
+  - /trainer: default_trainer
+  - /patching: frame        # 200-token grid; budget rule in masking/*.yaml
+  - /masking: random
   - _self_
 
 model: AudioSphereChannelMasked
 model_size: base
-save_dir: /projects/0/prjs1338/ablations/chan_independent
+save_dir: /projects/0/prjs1338/ablations/chan_mel2iv
 use_mwmae_decoder: True
 ckpt_path: null
 seed: 42
-channel_mask_mode: independent
+channel_mask_mode: mel2iv
 # Channel-axis run (infill regime): encoder sees ALL tokens (~2x encoder cost).
 # add_mask_indicator doubles conv in_channels to 14 — identical across all four
 # modes, so the quartet is architecture-matched and only the mask policy varies.

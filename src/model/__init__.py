@@ -1,2 +1,3 @@
-from .AudioSphere import GRAMT as GRAMT
-from .Sphere import Sphere as Sphere
+from .AudioSphere import AudioSphere as AudioSphere
+from .AudioSphereIVLoss import AudioSphereIVCosine as AudioSphereIVCosine
+from .AudioSphereMasking import AudioSphereChannelMasked as AudioSphereChannelMasked

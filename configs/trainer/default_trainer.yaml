@@ -4,4 +4,4 @@ accelerator: gpu
 steps: 50000
 precision: bf16-mixed
 num_gpus : 1
-compile_modules : True
+compile_modules : False

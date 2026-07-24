@@ -8,13 +8,14 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.data_modules import WebAudioDataModule
+
 from src.model import AudioSphere
+from src.model import AudioSphereChannelMasked
+from src.model import AudioSphereIVCosine
+
 from src.masking import SpatialMaskMaker
 from src.patching import PatchStrategy
 from utils import get_identity_from_cfg
-
-from src.audiosphere_channel_masking import AudioSphereChannelMasked
-from src.audiosphere_iv_cosine import AudioSphereIVCosine
 
 
 networks = {
@@ -24,9 +25,6 @@ networks = {
 }
 
 torch.set_float32_matmul_precision("medium")
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 torch.backends.cudnn.benchmark = True
 
 @hydra.main(version_base=None, config_path="./configs", config_name="base")
@@ -42,7 +40,7 @@ def main(cfg):
         dirpath=save_dir,
         filename="{step}",
         verbose=True,
-        every_n_train_steps=5000,
+        every_n_train_steps=10000,
         save_last=True,
         enable_version_counter=True,
         save_top_k=-1,
@@ -72,7 +70,6 @@ def main(cfg):
     mask_mode = mask_cfg.get("mask_mode", None) if mask_cfg is not None else None
     mask_patch = int(mask_cfg.get("mask_patch", cfg.data.mask_patch)) if mask_cfg is not None else int(cfg.data.mask_patch)
 
-    # ---------------- model ------------------------------------------------- #
     extra_model_kwargs = {}
     if cfg.model == "AudioSphereChannelMasked":
         extra_model_kwargs = dict(
@@ -128,16 +125,12 @@ def main(cfg):
         flush=True,
     )
 
-    # ---------------- data-side location masker ----------------------------- #
-    # For AudioSphereChannelMasked the location mask in the batch is ignored
-    # (the model draws its own channel mask per step); the masker stays wired
-    # so the data pipeline is identical across all runs.
     masker = SpatialMaskMaker(
         mask_patch=mask_patch,
         context_cluster=cfg.data.cluster,
-        mask_mode=mask_mode,          # None -> legacy random/cluster behavior
-        n_freq_patches=p_f_dim,       # from the actual grid, not from config
-        p_t_dim=p_t_dim,              # needed by cluster mode
+        mask_mode=mask_mode, 
+        n_freq_patches=p_f_dim,
+        p_t_dim=p_t_dim,
     )
 
     data = WebAudioDataModule(
