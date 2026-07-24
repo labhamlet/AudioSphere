@@ -1,3 +1,7 @@
+# Location-mask policy for SpatialMaskMaker (drop regime, pattern axis).
+# Budget rule: mask_patch MUST equal round(0.8 * N_tokens) for the grid in use:
+#   patching=frame_paper (25x8=200)  -> mask_patch: 160
+#   patching=frame       (20x8=160)  -> mask_patch: 128   (160 would mask 100%!)
 mask_mode: time
 n_freq_patches: 8
 mask_patch: 160

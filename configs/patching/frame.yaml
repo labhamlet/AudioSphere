@@ -1,6 +1,6 @@
-tstride: 8
-tshape: 8
+tstride: 10
+tshape: 10
 fstride: 16
 fshape: 16
-name: frame_paper
-decoder_window_sizes: [2, 5, 10, 25, 50, 100, 0, 0]
+name: frame
+decoder_window_sizes: [2,4,8,20,40,80,0,0]

@@ -1,0 +1,10 @@
+# Paper-consistent grid: patch 8(time) x 16(freq)  ->  2-s crop = 25 x 8 = 200 tokens
+# (matches the submission: "P_i in R^{7x8x16}", decoder windows [2,5,10,25,50,100,0,0],
+#  and mask_patch=160 == 80%). Use THIS for all rebuttal ablations unless you are
+# certain the published checkpoints used the tshape=10 grid.
+tstride: 8
+tshape: 8
+fstride: 16
+fshape: 16
+name: frame_paper
+decoder_window_sizes: [2, 5, 10, 25, 50, 100, 0, 0]
