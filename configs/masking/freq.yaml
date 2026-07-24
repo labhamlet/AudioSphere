@@ -1,3 +1,5 @@
 mask_mode: freq
 n_freq_patches: 8
-mask_patch: 160
+mask_patch: 16
+cluster : False
+

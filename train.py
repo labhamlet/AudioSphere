@@ -3,9 +3,10 @@ import gc
 import hydra
 import pytorch_lightning as pl
 import torch
+from omegaconf import OmegaConf
 from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import WandbLogger
 
 from src.data_modules import WebAudioDataModule
 
@@ -27,15 +28,31 @@ networks = {
 torch.set_float32_matmul_precision("medium")
 torch.backends.cudnn.benchmark = True
 
+
 @hydra.main(version_base=None, config_path="./configs", config_name="base")
 def main(cfg):
     identity = get_identity_from_cfg(cfg)
-    log_dir = f"{cfg.save_dir}/audio_sphere" if cfg.data.in_channels == 7 else f"{cfg.save_dir}/tb_logs_naturalistic_mixing"
-    save_dir = f"{cfg.save_dir}/audio_sphere/{identity.replace('_', '/')}" if cfg.data.in_channels == 7 else f"{cfg.save_dir}/saved_models_naturalistic_mixing/{identity.replace('_', '/')}"
-    logger = TensorBoardLogger(
-        log_dir,
-        name=identity.replace("_", "/"),
+    save_dir = (
+        f"{cfg.save_dir}/audio_sphere/{identity.replace('_', '/')}"
+        if cfg.data.in_channels == 7
+        else f"{cfg.save_dir}/saved_models_naturalistic_mixing/{identity.replace('_', '/')}"
     )
+
+    logger = WandbLogger(
+        project=cfg.get("wandb_project", "AudioSphere"),
+        name=identity,
+        group=cfg.get("run_group", "dev"),
+        tags=[
+            cfg.model,
+            f"in_channels={cfg.data.in_channels}",
+            f"model_size={cfg.model_size}",
+        ],
+        save_dir=cfg.save_dir,
+        config=OmegaConf.to_container(cfg, resolve=True),
+        log_model=False,
+        save_code=True,
+    )
+
     checkpoint_callback = ModelCheckpoint(
         dirpath=save_dir,
         filename="{step}",
@@ -125,10 +142,25 @@ def main(cfg):
         flush=True,
     )
 
+    logger.experiment.config.update(
+        {
+            "derived/p_f_dim": p_f_dim,
+            "derived/p_t_dim": p_t_dim,
+            "derived/n_tokens": n_tokens,
+            "derived/mask_patch": mask_patch,
+            "derived/mask_ratio": mask_patch / n_tokens,
+            "derived/mask_mode": mask_mode
+            or ("cluster" if cfg.data.cluster else "random"),
+            "derived/ckpt_dir": save_dir,
+        },
+        allow_val_change=True,
+    )
+
+    print(mask_cfg.cluster)
     masker = SpatialMaskMaker(
         mask_patch=mask_patch,
-        context_cluster=cfg.data.cluster,
-        mask_mode=mask_mode, 
+        context_cluster=mask_cfg.cluster,
+        mask_mode=mask_mode,
         n_freq_patches=p_f_dim,
         p_t_dim=p_t_dim,
     )
@@ -147,7 +179,10 @@ def main(cfg):
         with_rir=cfg.data.with_rir,
     )
     seed_everything(cfg.seed, workers=True)
-    trainer.fit(network_instance, data, ckpt_path=cfg.get("ckpt_path", None))
+    try:
+        trainer.fit(network_instance, data, ckpt_path=cfg.get("ckpt_path", None))
+    finally:
+        logger.experiment.finish()
 
 
 if __name__ == "__main__":

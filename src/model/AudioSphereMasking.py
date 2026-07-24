@@ -4,6 +4,11 @@ from .AudioSphere import AudioSphere
 
 import torch
 from torch import nn
+ 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 
 CHANNEL_NAMES = ["W", "Y", "Z", "X", "I_y", "I_z", "I_x"]
 MEL_CHANNELS = [0, 1, 2, 3]        # W, Y, Z, X log-mels
@@ -177,56 +182,77 @@ class AudioSphereChannelMasked(AudioSphere):
             patches_shape=self.patches_shape, patch_strategy=self.patch_strategy,
             input_shape=self.input_shape,
         )
-        self.logger.experiment.add_figure(
-            f"channel_masking/{self.channel_mask_mode}", fig, global_step=self.global_step
-        )
+        self._log_figure(f"channel_masking/{self.channel_mask_mode}", fig)
 
 
 def plot_channel_masking(
-    patches_flat: torch.Tensor,     # (1, N, C*fs*ts)  clean targets
-    pred_flat: torch.Tensor,        # (1, N, C*fs*ts)  reconstruction
-    chan_mask: torch.Tensor,        # (1, C, N) bool
-    patches_shape: Tuple[int, ...], # (B, N, C, fs, ts)
-    patch_strategy,                 # your PatchStrategy (for combine_patches)
-    input_shape: List[int],         # [F, T]
+    patches_flat: torch.Tensor,      # (1, N, C*fs*ts)  clean targets
+    pred_flat: torch.Tensor,         # (1, N, C*fs*ts)  reconstruction
+    chan_mask: torch.Tensor,         # (1, C, N) bool
+    patches_shape: Tuple[int, ...],  # (B, N, C, fs, ts)
+    patch_strategy,                  # PatchStrategy (for combine_patches)
+    input_shape: List[int],          # [F, T]
     channel_names: Optional[List[str]] = None,
 ):
-    """C rows x 3 cols: [original | masked input (fills shown as blank) |
-    reconstruction, masked regions only]. Returns a matplotlib figure."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import numpy as np
-
+    """C rows x 4 cols, one row per ambisonic channel:
+ 
+        original | masked input | reconstruction (masked patches only)
+                 | composite (visible original + predicted masked patches)
+ 
+    The composite is the reconstructed spectrogram as the model "sees" it come
+    back together: everything the encoder was given, plus its predictions in the
+    holes. Returns a matplotlib figure; the caller is responsible for closing it.
+    """
     _, N, C, fs, ts = patches_shape
-    names = channel_names or (CHANNEL_NAMES[:C] if C <= len(CHANNEL_NAMES)
-                              else [f"ch{i}" for i in range(C)])
-
-    def to_img(flat, zero_mask=None, keep_only_mask=None):
-        p = flat.reshape(1, N, C, fs, ts).clone()
-        if zero_mask is not None:                      # blank masked patches
-            p[0][zero_mask.permute(1, 0)] = float("nan")
-        if keep_only_mask is not None:                 # blank VISIBLE patches
-            p[0][(~keep_only_mask).permute(1, 0)] = float("nan")
-        img = patch_strategy.combine_patches(p, input_shape)   # (1, C, F, T)
-        return img[0].detach().cpu().numpy()
-
-    orig = to_img(patches_flat)
-    masked = to_img(patches_flat, zero_mask=chan_mask[0])
-    recon_full = pred_flat.reshape(1, N, C, fs, ts)
-    recon = to_img(recon_full.flatten(2), keep_only_mask=chan_mask[0])
-
-    vmin, vmax = np.nanpercentile(orig, 1), np.nanpercentile(orig, 99)
-    fig, axes = plt.subplots(C, 3, figsize=(11, 1.6 * C), constrained_layout=True)
-    col_titles = ["original", "masked input", "reconstruction (masked only)"]
+    names = channel_names or (
+        CHANNEL_NAMES[:C] if C <= len(CHANNEL_NAMES) else [f"ch{i}" for i in range(C)]
+    )
+ 
+    tgt = patches_flat.detach().reshape(1, N, C, fs, ts).float()
+    prd = pred_flat.detach().reshape(1, N, C, fs, ts).float()
+    m = chan_mask[0].to(tgt.device).permute(1, 0)      # (N, C) True == masked
+ 
+    def to_img(p: torch.Tensor) -> np.ndarray:
+        return patch_strategy.combine_patches(p, input_shape)[0].cpu().numpy()
+ 
+    def blank(p: torch.Tensor, where: torch.Tensor) -> torch.Tensor:
+        """NaN out the selected patches so they render as background."""
+        q = p.clone()
+        q[0][where] = float("nan")
+        return q
+ 
+    # Visible target patches + predicted masked patches.
+    composite = tgt.clone()
+    composite[0][m] = prd[0][m]
+ 
+    panels = [
+        ("original", to_img(tgt)),
+        ("masked input", to_img(blank(tgt, m))),
+        ("recon (masked only)", to_img(blank(prd, ~m))),
+        ("recon (composite)", to_img(composite)),
+    ]
+ 
+    # Shared color scale across all panels, taken from the clean target, so the
+    # reconstruction is judged on the same scale rather than auto-stretched.
+    vmin, vmax = np.nanpercentile(panels[0][1], 1), np.nanpercentile(panels[0][1], 99)
+    cmap = plt.get_cmap("magma").copy()
+    cmap.set_bad(color="0.15")                          # NaN (masked) -> dark gray
+ 
+    fig, axes = plt.subplots(
+        C, len(panels), figsize=(14, 1.6 * C), constrained_layout=True, squeeze=False
+    )
     for c in range(C):
-        for j, img in enumerate((orig, masked, recon)):
-            ax = axes[c, j] if C > 1 else axes[j]
-            ax.imshow(img[c], origin="lower", aspect="auto", vmin=vmin, vmax=vmax,
-                      cmap="magma", interpolation="nearest")
-            ax.set_xticks([]); ax.set_yticks([])
+        for j, (title, img) in enumerate(panels):
+            ax = axes[c, j]
+            ax.imshow(
+                img[c], origin="lower", aspect="auto", vmin=vmin, vmax=vmax,
+                cmap=cmap, interpolation="nearest",
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
             if c == 0:
-                ax.set_title(col_titles[j], fontsize=9)
+                ax.set_title(title, fontsize=9)
             if j == 0:
                 ax.set_ylabel(names[c], fontsize=9, rotation=0, ha="right", va="center")
     return fig
+ 

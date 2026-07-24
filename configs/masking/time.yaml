@@ -5,3 +5,4 @@
 mask_mode: time
 n_freq_patches: 8
 mask_patch: 160
+cluster : False

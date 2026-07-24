@@ -30,6 +30,7 @@ try:
 except ImportError as e:
     print(f"Got {e} this is expected if you are training.")
 
+import matplotlib.pyplot as plt   # top of file
 
 set_fused_attn(True)
 use_fused_attn(True)
@@ -388,6 +389,16 @@ class AudioSphere(pl.LightningModule):
         pred = pred[:, return_cut:, :]
         return pred
 
+    def _log_figure(self, tag: str, fig) -> None:
+        """Logger-agnostic figure logging; always closes the figure."""
+        try:
+            logger = self.logger
+            if hasattr(logger, "log_image"):                  # WandbLogger
+                logger.log_image(key=tag, images=[fig], step=self.global_step)
+            elif hasattr(getattr(logger, "experiment", None), "add_figure"):
+                logger.experiment.add_figure(tag, fig, global_step=self.global_step)
+        finally:
+            plt.close(fig)
     def log_first_spectrogram(self, patches, title, loss, **kwargs):
         sample_img = patches[:1].clone()
         patches_unflattened = sample_img.unflatten(2, self.patches_shape[2:])
@@ -411,8 +422,9 @@ class AudioSphere(pl.LightningModule):
             if "direction" in kwargs
             else f"Loss: {loss}"
         )
+
         fig = plot_fbank(combined[0], vmin=color_min, vmax=color_max, title=title_plot)
-        self.logger.experiment.add_figure(f"{title}", fig, global_step=self.global_step)
+        self._log_figure(title, fig) 
 
     def log_first_spectrogram_with_mask(self, patches, mask, title):
         sample_img = patches[:1].clone().detach().cpu()
@@ -430,9 +442,8 @@ class AudioSphere(pl.LightningModule):
             .numpy()
         )
         combined = combined.transpose(0, 1, 3, 2)
-        fig = plot_fbank(combined[0], vmin=color_min, vmax=color_max)
-        self.logger.experiment.add_figure(f"{title}", fig, global_step=self.global_step)
-
+        fig = plot_fbank(combined[0], vmin=color_min, vmax=color_max, title=f"{title}")
+        self._log_figure(title, fig)          # was: self.logger.experiment.add_figure(...)
     def loss(self, pred, target, mask):
         """
         Mask is the boolean tensor containing 1 for masked indices, and 0 for non-mask-indices

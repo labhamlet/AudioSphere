@@ -1,0 +1,4 @@
+mask_mode: cluster
+n_freq_patches: 8
+mask_patch: 160
+cluster : True
