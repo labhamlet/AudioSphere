@@ -70,16 +70,11 @@ class FeatureExtractor(torch.nn.Module):
             foa_iv: Tensor of shape (batch, nb_mel_bins * 3)
         """
 
-        # Extract W channel (omnidirectional component)
         W = linear_spectra[: , [0], ...]
         XYZ = linear_spectra[:, 1:, ...]
         
-        # Compute intensity vectors using complex conjugate
-        # I = 2 * Re(conj(W) * [X, Y, Z])
         I = 2 * torch.real(torch.conj(W) * XYZ)
         
-        # Compute energy with epsilon for numerical stability
-        # E = eps + |W|^2 + (|X|^2 + |Y|^2 + |Z|^2)/3
         W_power = torch.squeeze(torch.abs(W) ** 2)
         xyz_power = torch.sum(torch.abs(XYZ) ** 2, dim=1)
         E = self.eps + W_power + xyz_power

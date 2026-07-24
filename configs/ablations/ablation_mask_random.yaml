@@ -1,0 +1,16 @@
+# Rebuttal ablation: mask_random_control — launch like base.yaml (hydra root); 50k steps.
+defaults:
+  - data: audioset_ambisonics
+  - optimizer: adamW
+  - trainer: default_trainer
+  - patching: frame_paper        # 200-token grid; budget rule in masking/*.yaml
+  - masking: random
+  - _self_
+
+model: AudioSphere
+model_size: base
+save_dir: /projects/0/prjs1338/ablations/mask_random_control
+use_mwmae_decoder: True
+ckpt_path: null
+seed: 42
+
