@@ -1,7 +1,7 @@
 epochs: -1
-batch_size: 96
+batch_size: 32
 accelerator: gpu
-steps: 500000
+steps: 50000
 precision: bf16-mixed
 num_gpus : 1
 compile_modules : True

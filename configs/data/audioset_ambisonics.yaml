@@ -4,7 +4,6 @@ base_noise_dir: "/projects/0/prjs1338/noise/wham_noise/tr/webdataset_output_3200
 rir_data_dir: "/projects/0/prjs1261/SequentialAmbisonicRIRs32000/train/shard-{000000..000069}.tar"
 data_ratio : 1.0
 
-#Input specific params
 num_mel_bins: 128 
 sr: 32000
 in_channels: 7
@@ -12,11 +11,9 @@ input_length: 1024
 target_length: 200
 samples_per_audio: 16
 
-#Masking specific params
 mask_patch: 160
 cluster: False
 
-#Naturalistic Scene specific params
 clean_data_ratio : 0.0
 with_noise : True
 with_rir : True
