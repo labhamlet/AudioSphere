@@ -1,0 +1,6 @@
+tstride: 10
+tshape: 10
+fstride: 16
+fshape: 16
+name: frame
+decoder_window_sizes: [2,4,8,20,40,80,0,0]
