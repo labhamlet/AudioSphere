@@ -4,10 +4,31 @@ sys.path.append("..")
 import torch
 
 from src.model import AudioSphere
+from src.model import AudioSphereChannelMasked
+from src.model import AudioSphereIVCosine
+
 from src.patching import PatchStrategy
 
 from .feature_helper_audio_sphere import FeatureExtractor, get_timestamps
-import torch.nn.functional as F 
+import torch.nn.functional as F
+
+
+
+
+def _to_bool(v) -> bool:
+    """model_options arrive as JSON strings: 'false' is truthy in Python."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "y")
+    return bool(v)
+
+
+class _ZeroIndicatorProj(torch.nn.Module):
+    def __init__(self, proj: torch.nn.Conv2d):
+        super().__init__()
+        self.proj = proj
+
+    def forward(self, x):
+        return self.proj(torch.cat([x, torch.zeros_like(x)], dim=1))
 
 
 class RuntimeAudioSphere(torch.nn.Module):
@@ -24,20 +45,43 @@ class RuntimeAudioSphere(torch.nn.Module):
         input_tdim,
         starategy: str = "raw",
         layer: int = None,
-        skip_weights = False,
+        skip_weights=False,
         **kwargs,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.decoder_depth = kwargs.get("decoder_depth", 8)
-        self.use_mwmae_decoder = kwargs.get("use_mwmae_decoder", False)
+        self.use_mwmae_decoder = _to_bool(kwargs.get("use_mwmae_decoder", False))
         self.decoder_num_heads = kwargs.get("decoder_num_heads", 8)
         self.mlp_ratio = kwargs.get("mlp_ratio", 4.0)
         self.decoder_window_sizes = kwargs.get(
             "decoder_window_sizes", [2, 5, 10, 25, 50, 100, 0, 0]
         )
         self.num_mel_bins = kwargs.get("num_mel_bins", 128)
-        self.model = AudioSphere(
+
+        # ------------------------------------------------ class selection --- #
+        model_class = kwargs.get("model_class", "AudioSphere")
+        networks = {"AudioSphere": AudioSphere}
+        if AudioSphereChannelMasked is not None:
+            networks["AudioSphereChannelMasked"] = AudioSphereChannelMasked
+        if AudioSphereIVCosine is not None:
+            networks["AudioSphereIVCosine"] = AudioSphereIVCosine
+        if model_class not in networks:
+            raise ValueError(
+                f"model_class={model_class!r} not importable/known; "
+                f"have {sorted(networks)}"
+            )
+
+        extra = {}
+        if model_class == "AudioSphereChannelMasked":
+            extra = dict(
+                channel_mask_mode=kwargs.get("channel_mask_mode", "tube"),
+                add_mask_indicator=_to_bool(kwargs.get("add_mask_indicator", True)),
+            )
+        elif model_class == "AudioSphereIVCosine":
+            extra = dict(dir_eps=float(kwargs.get("dir_eps", 1e-6)))
+
+        self.model = networks[model_class](
             model_size=model_size,
             patch_strategy=PatchStrategy(
                 tstride=tstride,
@@ -50,8 +94,39 @@ class RuntimeAudioSphere(torch.nn.Module):
             in_channels=in_channels,
             decoder_window_sizes=self.decoder_window_sizes,
             use_mwmae_decoder=self.use_mwmae_decoder,
+            **extra,
         )
-        self.model.load_state_dict(weights["state_dict"], strict=False)
+
+        # ------------------------------------------------ checkpoint load --- #
+        if not skip_weights:
+            result = self.model.load_state_dict(weights["state_dict"], strict=False)
+            # strict=False still hard-fails on shape mismatches, so if we get
+            # here shapes agree — but a checkpoint/class mix-up also shows up
+            # as *missing* encoder weights silently left at random init, which
+            # produces garbage embeddings, not a crash. Refuse that.
+            critical = [
+                k for k in result.missing_keys
+                if k.startswith(("encoder.", "patch_embed.", "cls_token"))
+            ]
+            if critical:
+                raise RuntimeError(
+                    f"Checkpoint is missing {len(critical)} encoder-side keys "
+                    f"(e.g. {critical[:3]}); wrong model_class or wrong ckpt? "
+                    f"model_class={model_class}"
+                )
+            if result.missing_keys or result.unexpected_keys:
+                print(
+                    f"[RuntimeAudioSphere] non-critical load report: "
+                    f"missing={result.missing_keys} "
+                    f"unexpected={result.unexpected_keys}"
+                )
+
+        # ---------------------------------------------- indicator shim ------ #
+        # AFTER loading: keys must match the checkpoint before wrapping.
+        if getattr(self.model, "add_mask_indicator", False):
+            self.model.patch_embed.proj = _ZeroIndicatorProj(
+                self.model.patch_embed.proj
+            )
 
         # The input size to the model is the input_t_dim and the number of mel bins.
         self.grid_size = self.model.grid_size
@@ -111,12 +186,11 @@ class RuntimeAudioSphere(torch.nn.Module):
             x = torch.stack(embeddings, dim=1)
             return x
 
-
-    def audio2feats(self, audio):            
+    def audio2feats(self, audio):
         x = self.to_feature(audio)
         x = self.encode(x)
         return x
-    
+
     def get_scene_embeddings(self, audio):
         x = self.audio2feats(audio)
         # This takes the mean embedding across the scene!

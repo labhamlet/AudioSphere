@@ -18,6 +18,7 @@ from src.masking import SpatialMaskMaker
 from src.patching import PatchStrategy
 from utils import get_identity_from_cfg
 
+from pytorch_lightning.callbacks import TQDMProgressBar
 
 networks = {
     "AudioSphere": AudioSphere,
@@ -70,7 +71,7 @@ def main(cfg):
         max_steps=cfg.trainer.steps // cfg.trainer.num_gpus,
         precision=cfg.trainer.precision,
         deterministic=False,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, lr_monitor, TQDMProgressBar()],
         gradient_clip_val=5,
         gradient_clip_algorithm="norm",
         log_every_n_steps=1,

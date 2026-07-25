@@ -1850,16 +1850,9 @@ def task_predictions(
     grid: str,
     logger: logging.Logger,
 ):
-    # By setting workers=True in seed_everything(), Lightning derives
-    # unique seeds across all dataloader workers and processes
-    # for torch, numpy and stdlib random number generators.
-    # Note that if you change the number of workers, determinism
-    # might change.
-    # However, it appears that workers=False does get deterministic
-    # results on 4 multi-worker jobs I ran, probably because our
-    # dataloader doesn't do any augmentation or use randomness.
     if deterministic:
-        seed_everything(42, workers=True)
+        seed = int(os.environ.get("HEAR_SEED", "42"))
+        seed_everything(seed, workers=True)
 
     metadata = json.load(embedding_path.joinpath("task_metadata.json").open())
     label_vocab, nlabels = label_vocab_nlabels(embedding_path)

@@ -4,7 +4,6 @@ import cls_feature_class
 import parameters
 import numpy as np
 from scipy import stats
-from IPython import embed
 
 def jackknife_estimation(global_value, partial_estimates, significance_level=0.05):
     """
@@ -68,6 +67,7 @@ class ComputeSELDResults(object):
 
         self._nb_ref_files = len(self._ref_labels)
         self._average = params['average']
+        self.nr_classes = params["unique_classes"]
 
     @staticmethod
     def get_nb_files(file_list, tag='all'):
@@ -144,7 +144,7 @@ class ComputeSELDResults(object):
                            partial_estimates=partial_estimates[:, i],
                            significance_level=0.05
                            )
-            return [ER, conf_interval[0]], [F, conf_interval[1]], [LE, conf_interval[2]], [LR, conf_interval[3]], [seld_scr, conf_interval[4]], [classwise_results, np.array(conf_interval)[5:].reshape(5,13,2) if len(classwise_results) else []]
+            return [ER, conf_interval[0]], [F, conf_interval[1]], [LE, conf_interval[2]], [LR, conf_interval[3]], [seld_scr, conf_interval[4]], [classwise_results, np.array(conf_interval)[5:].reshape(5,self.nr_classes,2) if len(classwise_results) else []]
       
         else:      
             return ER, F, LE, LR, seld_scr, classwise_results
@@ -221,8 +221,4 @@ classwise_test_scr[0][1][cls_cnt] if use_jackknife else classwise_test_scr[1][cl
 classwise_test_scr[0][2][cls_cnt] if use_jackknife else classwise_test_scr[2][cls_cnt], '[{:0.2f}, {:0.2f}]'.format(classwise_test_scr[1][2][cls_cnt][0], classwise_test_scr[1][2][cls_cnt][1]) if use_jackknife else '', 
 classwise_test_scr[0][3][cls_cnt] if use_jackknife else classwise_test_scr[3][cls_cnt], '[{:0.2f}, {:0.2f}]'.format(classwise_test_scr[1][3][cls_cnt][0], classwise_test_scr[1][3][cls_cnt][1]) if use_jackknife else '', 
 classwise_test_scr[0][4][cls_cnt] if use_jackknife else classwise_test_scr[4][cls_cnt], '[{:0.2f}, {:0.2f}]'.format(classwise_test_scr[1][4][cls_cnt][0], classwise_test_scr[1][4][cls_cnt][1]) if use_jackknife else ''))
-
-
-    # UNCOMMENT to Compute DCASE results along with room-wise performance
-    # score_obj.get_consolidated_SELD_results(pred_output_format_files)
 

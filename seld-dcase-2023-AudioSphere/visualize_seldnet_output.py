@@ -8,7 +8,6 @@ import cls_data_generator
 import seldnet_model
 import parameters
 import torch
-from IPython import embed
 import matplotlib
 matplotlib.use('Agg')
 #matplotlib.use('TkAgg')

@@ -33,7 +33,7 @@ def get_identity_from_cfg(cfg):
         _san(cfg.patching.get("name")),
         _resolved_mask_patch(cfg),
         cfg.data.target_length,
-        cfg.data.cluster,
+        cfg.masking.cluster,
     )
 
     # ---- ablation tokens: appended ONLY when the keys exist ---------------

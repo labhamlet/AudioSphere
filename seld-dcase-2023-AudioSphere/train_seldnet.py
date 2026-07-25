@@ -13,8 +13,8 @@ import torch.optim as optim
 plot.switch_backend('agg')
 from cls_compute_seld_results import ComputeSELDResults, reshape_3Dto2D
 from SELD_evaluation_metrics import distance_between_cartesian_coordinates
+import ablations
 import seldnet_model
-
 sys.path.append("..")
 
 
@@ -23,10 +23,11 @@ def build_model(data_in, data_out, params, device):
     if params['model'] == 'seldnet':
         model = seldnet_model.SeldModel(data_in, data_out, params)
     elif params['model'] == 'audio_sphere':
-        model = seldnet_model.AudioSphereSELD(
+        model = ablations.AudioSphereSELD(
             data_out, params,
-            ckpt_path=params['audio_sphere_ckpt'],
-            freeze_encoder=params['freeze_encoder'],
+            ckpt_path=params["ckpt_path"],
+            model_class=params["model_class"],
+            use_mwmae_decoder=True
         )
     else:
         raise ValueError("Unknown model type: {} (use 'seldnet' or 'audio_sphere')".format(params['model']))
@@ -255,7 +256,7 @@ def main(argv):
         if '2020' in params['dataset_dir']:
             test_splits = [1]
             val_splits = [2]
-            train_splits = [[3]]
+            train_splits = [[3,4,5,6]]
 
         elif '2021' in params['dataset_dir']:
             test_splits = [6]

@@ -33,7 +33,7 @@ import torchaudio
 # Later publish it to pypi.
 import sys
 
-sys.path.append("../../GRAM-T")
+sys.path.append("../../AudioSphere")
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union

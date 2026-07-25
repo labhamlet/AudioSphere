@@ -1,7 +1,37 @@
-# Parameters used in the feature extraction, neural network model, and training the SELDnet can be changed here.
-#
-# Ideally, do not change the values of the default parameters. Create separate cases with unique <task-id> as seen in
-# the code below (if-else loop) and use them. This way you can easily reproduce a configuration on a later time.
+import os
+
+_ABL_ROOT = '/projects/0/prjs1261/ablations'
+_ABL_STEP = os.environ.get('ABL_STEP', '20000')
+_ABL_COMMON = (
+    'audio_sphere/InChannels=7/Fraction=1.0/CleanDataFraction=0.0/'
+    'Model={model}/ModelSize=base/LR=0.0002/BatchSize=32/NrSamples=4/'
+    'Patching=frame-paper/MaskPatch={mp}/InputL=200/Cluster=False{suffix}'
+)
+
+_ABLATIONS = {
+    '100': ('chan_tube',           'AudioSphereChannelMasked', 160, '/ChannelMask=tube/Indicator=True'),
+    '101': ('chan_independent',    'AudioSphereChannelMasked', 160, '/ChannelMask=independent/Indicator=True'),
+    '102': ('mask_random_control', 'AudioSphere',              160, ''),
+    '103': ('mask_time',           'AudioSphere',              160, '/MaskMode=time'),
+    '104': ('mask_freq',           'AudioSphere',              160, '/MaskMode=freq'),
+    '105': ('chan_mel2iv',         'AudioSphereChannelMasked', 160, '/ChannelMask=mel2iv/Indicator=True'),
+    '106': ('chan_w_iv2xyz',       'AudioSphereChannelMasked', 160, '/ChannelMask=w-iv2xyz/Indicator=True'),
+    '107': ('mask_random_r020',    'AudioSphere',               40, ''),
+    '108': ('mask_random_r040',    'AudioSphere',               80, ''),
+    '109': ('mask_random_r060',    'AudioSphere',              120, ''),
+    '110': ('mask_random_r090',    'AudioSphere',              180, ''),
+    '111': ('ivloss_cosine',       'AudioSphereIVCosine',      160, '/IVLoss=cosine'),
+    '112': ('mask_cluster',        'AudioSphere',              160, '/MaskMode=cluster'),
+}
+
+
+def _ablation_ckpt(name, model_class, mp, suffix):
+    fname = 'last.ckpt' if _ABL_STEP == 'last' else 'step={}.ckpt'.format(_ABL_STEP)
+    return '{}/{}/{}/{}'.format(
+        _ABL_ROOT, name,
+        _ABL_COMMON.format(model=model_class, mp=mp, suffix=suffix),
+        fname,
+    )
 
 
 def get_params(argv='1'):
@@ -10,16 +40,16 @@ def get_params(argv='1'):
     params = dict(
         quick_test=False,
         finetune_mode=False,  # Finetune on existing model, requires the pretrained model path set - pretrained_model_weights
-        pretrained_model_weights='/projects/0/prjs1338/seld/STARSS2023/2_1_dev_split0_accdoa_foa_model.h5',
+        pretrained_model_weights='/projects/0/prjs1261/seld/TAU2020/2_1_dev_split0_accdoa_foa_model.h5',
 
         # INPUT PATH
-        dataset_dir='/projects/0/prjs1338/seld/STARSS2023',
+        dataset_dir='/projects/0/prjs1261/seld/TAU2020',
 
         # OUTPUT PATHS
-        feat_label_dir='/projects/0/prjs1338/seld/STARSS2023_labels_audio_sphere',
+        feat_label_dir='/projects/0/prjs1261/seld/TAU2020_labels_audio_sphere',
 
-        model_dir='/projects/0/prjs1338/seld/STARSS2023_saved_models_audio_sphere',            # Dumps the trained models and training curves in this folder
-        dcase_output_dir='/projects/0/prjs1338/seld/STARSS2023_results_audio_sphere',    # recording-wise results are dumped in this path.
+        model_dir='/projects/0/prjs1261/seld/TAU2020_saved_models_audio_sphere',            # Dumps the trained models and training curves in this folder
+        dcase_output_dir='/projects/0/prjs1261/seld/TAU2020_results_audio_sphere',    # recording-wise results are dumped in this path.
 
         # DATASET LOADING PARAMETERS
         mode='dev',         # 'dev' - development or 'eval' - evaluation dataset
@@ -40,8 +70,15 @@ def get_params(argv='1'):
 
         # MODEL TYPE
         model='audio_sphere',   # 'seldnet' - baseline CNN SELDnet, 'audio_sphere' - pre-trained AudioSphere encoder
-        audio_sphere_ckpt='/projects/0/prjs1338/seld/audio_sphere.ckpt',  # local checkpoint for the AudioSphere encoder
-        freeze_encoder=True,    # freeze the AudioSphere encoder (note: RuntimeAudioSphere.encode is no_grad anyway)
+        audio_sphere_ckpt="/projects/0/prjs1261/ablations/ivloss_cosine/audio_sphere/InChannels=7/Fraction=1.0/CleanDataFraction=0.0/Model=AudioSphereIVCosine/ModelSize=base/LR=0.0002/BatchSize=32/NrSamples=4/Patching=frame-paper/MaskPatch=160/InputL=200/Cluster=False/IVLoss=cosine/step=20000.ckpt",  # local checkpoint for the AudioSphere encoder
+
+        # build_model() reads these two; ablation tasks (100-111) set them from
+        # the table above, legacy tasks fall back to audio_sphere_ckpt at the
+        # bottom of this function.
+        ckpt_path=None,             # resolved below if left None
+        model_class='AudioSphere',  # AudioSphere | AudioSphereChannelMasked | AudioSphereIVCosine
+
+        freeze_encoder=True,    # freeze the AudioSphere encoder (pass to AudioSphereSELD in build_model!)
 
         multi_accdoa=False,  # False - Single-ACCDOA or True - Multi-ACCDOA
         thresh_unify=15,     # Required for Multi-ACCDOA only. Threshold of unification for inference in degrees.
@@ -68,6 +105,7 @@ def get_params(argv='1'):
         # METRIC
         average='macro',          # Supports 'micro': sample-wise average and 'macro': class-wise average
         lad_doa_thresh=20,
+
     )
 
     # ########### User defined parameters ##############
@@ -102,6 +140,25 @@ def get_params(argv='1'):
         params['multi_accdoa'] = True
         params['model'] = 'audio_sphere'
 
+    elif argv in _ABLATIONS:
+        name, model_class, mp, suffix = _ABLATIONS[argv]
+        print("FOA + ACCDOA + AUDIOSPHERE ABLATION: {} ({})\n".format(name, model_class))
+        params['quick_test'] = False
+        params['dataset'] = 'foa'
+        params['multi_accdoa'] = False
+        params['model'] = 'audio_sphere'
+        params['freeze_encoder'] = True
+        params['ablation_name'] = name
+        params['model_class'] = model_class
+        params['ckpt_path'] = _ablation_ckpt(name, model_class, mp, suffix)
+        # Namespace outputs per ablation so 12 concurrent array tasks cannot
+        # clobber each other's models/results:
+        params['model_dir'] = os.path.join(params['model_dir'], name)
+        params['dcase_output_dir'] = os.path.join(params['dcase_output_dir'], name)
+        if not os.path.isfile(params['ckpt_path']):
+            print('ERROR: ablation checkpoint not found:\n  {}'.format(params['ckpt_path']))
+            exit()
+
     elif argv == '999':
         print("QUICK TEST MODE\n")
         params['quick_test'] = True
@@ -109,6 +166,18 @@ def get_params(argv='1'):
     else:
         print('ERROR: unknown argument {}'.format(argv))
         exit()
+
+    # ---- legacy tasks (1, 4, 5, 999): resolve ckpt_path/model_class from the
+    # default audio_sphere_ckpt. The class is inferred from the identity path,
+    # NOT assumed: the current default points at the ivloss_cosine run, which
+    # must load as AudioSphereIVCosine.
+    if params['ckpt_path'] is None:
+        params['ckpt_path'] = params['audio_sphere_ckpt']
+        if '/IVLoss=cosine/' in params['ckpt_path']:
+            params['model_class'] = 'AudioSphereIVCosine'
+        elif '/ChannelMask=' in params['ckpt_path']:
+            params['model_class'] = 'AudioSphereChannelMasked'
+        # else: keep the 'AudioSphere' default
 
     params['patience'] = int(params['nb_epochs'])     # Stop training if patience is reached
     feature_label_resolution = int(params['label_hop_len_s'] // params['hop_len_s'])
