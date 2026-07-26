@@ -1,6 +1,6 @@
-# GRAM-T : General-purpose audio representation model Transformer
+# AudioSphere : General-purpose audio representation model Transformer
 
-This repository contains the implementation of GRAM-T, a state-of-the-art audio processing model trained on AudioSet with naturalistic scenes. It includes the listen-eval-kit, an extended fork of hear-eval-kit with enhanced functionality for sound localization tasks. The framework leverages PyTorch Lightning and Hydra with TensorBoard logging for comprehensive hyperparameter optimization.
+This repository contains the implementation of AudioSphere, a state-of-the-art audio processing model trained on AudioSet with naturalistic scenes. It includes the listen-eval-kit, an extended fork of hear-eval-kit with enhanced functionality for sound localization tasks. The framework leverages PyTorch Lightning and Hydra with TensorBoard logging for comprehensive hyperparameter optimization.
 
 ## System Requirements
 
@@ -14,8 +14,8 @@ This repository has been validated with:
 
 ```bash
 # Create and activate conda environment
-conda create -n gram-t python=3.9 -y
-conda activate gram-t
+conda create -n AudioSphere python=3.9 -y
+conda activate AudioSphere
 
 # Install GRAM-M specific dependencies
 pip install -r requirements.txt
@@ -25,8 +25,8 @@ pip install -r requirements.txt
 ### Evaluation Environment
 
 ```bash
-conda create -n gram-t-eval python=3.9 -y
-conda activate gram-t-eval
+conda create -n AudioSphere-eval python=3.9 -y
+conda activate AudioSphere-eval
 
 # Install GRAM-M specific dependencies
 pip install -r requirements_eval.txt
@@ -34,13 +34,13 @@ pip install -r requirements_eval.txt
 
 ## Model Training
 
-### GRAM-T-Time Model Training
+### AudioSphere-Time Model Training
 
 ```bash
 python3 train.py data=audioset data.sr=32000 patching=time data.mask_patch=80 trainer.batch_size=32 trainer.steps=200000
 ```
 
-### GRAM-T-Patch Model Training
+### AudioSphere-Patch Model Training
 
 ```bash
 python3 train.py data=audioset data.sr=32000 patching=frame data.mask_patch=100 trainer.batch_size=32 trainer.steps=200000
