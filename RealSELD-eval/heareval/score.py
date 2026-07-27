@@ -1019,16 +1019,7 @@ class SELD(ScoreFunction):
             pred_dict = convert_output_format_cartesian_to_polar(pred_dict)
  
             if _nb_label_frames_1s == _nb_pred_frames_1s:
-                # (2) Segment over the REFERENCE span, as ComputeSELDResults
-                #     does (nb_ref_frames = max(gt_dict.keys())). Taking the
-                #     span from the predictions truncates the reference at the
-                #     last detection, so misses after that point are never
-                #     counted - and with no detections at all the old bare
-                #     `except: max_frames = 1` collapsed the whole recording to
-                #     a single block, giving Nref=0 and a vacuous SELD of 0.75.
-                last_ref = max(ref_dict.keys(), default=0)
-                last_pred = max(pred_dict.keys(), default=0)
-                max_frames = max(_max_ref_frame, last_ref, last_pred) + 1
+                max_frames = max(ref_dict.keys(), default=0)
  
                 pred_labels = segment_labels(
                     pred_dict, max_frames, nb_frames_1s=_nb_label_frames_1s
@@ -1082,7 +1073,8 @@ class SELD(ScoreFunction):
         overall_scores["SELD"] = seld_scr
  
         return tuple([(score, float(overall_scores[score])) for score in self.scores])
-    
+ 
+
 class SegmentBasedScore(SoundEventScore):
     """
     segment-based scores - the ground truth and system output are compared in a
