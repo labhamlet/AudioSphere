@@ -237,7 +237,7 @@ class AudioSphereSELD(nn.Module):
 
         self.D = embed_dim              # token dim
         self.F = f_patches              # nr. frequency patches (F*D == raw last dim)
-
+        dropout = params.get('dropout_rate', 0.1)
         # ---- Attention frequency pooling (learned query over F patches) ----
         self.input_norm = nn.LayerNorm(self.F * self.D)
         self.q_freq = nn.Parameter(torch.randn(self.D) * 0.02)
@@ -274,8 +274,11 @@ class AudioSphereSELD(nn.Module):
             nn.Linear(params['fnn_size'] if params['nb_fnn_layers'] else params['rnn_size'],
                       out_shape[-1], bias=True)
         )
+        self.proj_gru = nn.Sequential( nn.LayerNorm(self.D_gr), 
+                                       nn.Linear(self.D_gr, 256), 
+                                       nn.GELU(), 
+                                       nn.Dropout(dropout))
 
-    # keep the frozen encoder in eval mode regardless of .train()/.eval()
     def train(self, mode: bool = True):
         super().train(mode)
         if self.freeze_encoder:
@@ -313,7 +316,7 @@ class AudioSphereSELD(nn.Module):
         z = self._adapt_time(z)                        # (B, T_seld, D)
 
         # ---- BiGRU + tanh multiplicative gating (as in SeldModel) ----
-        z, _ = self.gru(z)
+        z, _ = self.gru(self.proj_gru(z))
         z = torch.tanh(z)
         z = z[:, :, z.shape[-1] // 2:] * z[:, :, :z.shape[-1] // 2]
 

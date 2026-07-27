@@ -23,10 +23,9 @@ def build_model(data_in, data_out, params, device):
     if params['model'] == 'seldnet':
         model = seldnet_model.SeldModel(data_in, data_out, params)
     elif params['model'] == 'audio_sphere':
-        model = ablations.AudioSphereSELD(
+        model = seldnet_model.AudioSphereSELD(
             data_out, params,
-            ckpt_path=params["ckpt_path"],
-            model_class=params["model_class"],
+            ckpt_path="/gpfs/work5/0/prjs1261/saved_models_naturalistic_mixing_ambisonics/InChannels=7/Fraction=1.0/CleanDataFraction=0.0/Model=GRAM-T/ModelSize=base/LR=0.0002/BatchSize=96/NrSamples=16/Patching=frame/MaskPatch=160/InputL=200/Cluster=False/step=500000.ckpt",
             use_mwmae_decoder=True
         )
     else:

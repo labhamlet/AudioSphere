@@ -2,6 +2,7 @@ import torch
 import torchaudio
 from .ambisonic_feature_extractor import FeatureExtractor as Extractor
 
+
 def normalize_audio(audio_data, target_dBFS=-14.0):
     rms = torch.sqrt(torch.mean(audio_data**2))  # Calculate the RMS of the audio
     if rms == 0:  # Avoid division by zero in case of a completely silent audio
@@ -11,6 +12,8 @@ def normalize_audio(audio_data, target_dBFS=-14.0):
     gain_linear = 10 ** (gain_dB / 20)  # Convert gain from dB to linear scale
     normalized_audio = audio_data * gain_linear  # Apply the gain to the audio data
     return normalized_audio
+
+
 
 class FeatureExtractor(torch.nn.Module):
     def __init__(

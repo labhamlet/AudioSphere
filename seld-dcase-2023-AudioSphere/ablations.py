@@ -317,18 +317,6 @@ class AudioSphereSELD(nn.Module):
             self.audio_sphere.eval()
         return self
 
-    # --------------------------------------------------------------------- #
-    # Encoding
-    #
-    # RuntimeAudioSphere.encode wraps the model call in torch.no_grad().
-    # With freeze_encoder=True that is exactly right (and saves activation
-    # memory). With freeze_encoder=False it is a silent killer: the encoder's
-    # parameters require grad and sit in the optimizer, but no gradient ever
-    # reaches them, so "full fine-tuning" quietly trains only the SELD head.
-    # An inner no_grad cannot be overridden from outside (enable_grad() does
-    # not penetrate it), so the unfrozen path re-implements the same
-    # chunk/pad/stitch logic WITHOUT no_grad.
-    # --------------------------------------------------------------------- #
     def _encode(self, x):
         if self.freeze_encoder:
             return self.audio_sphere.encode(x)          # no_grad inside: correct here

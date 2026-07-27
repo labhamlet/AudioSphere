@@ -1,7 +1,7 @@
 import os
 
 _ABL_ROOT = '/projects/0/prjs1261/ablations'
-_ABL_STEP = os.environ.get('ABL_STEP', '20000')
+_ABL_STEP = os.environ.get('ABL_STEP', '50000')
 _ABL_COMMON = (
     'audio_sphere/InChannels=7/Fraction=1.0/CleanDataFraction=0.0/'
     'Model={model}/ModelSize=base/LR=0.0002/BatchSize=32/NrSamples=4/'
@@ -70,7 +70,6 @@ def get_params(argv='1'):
 
         # MODEL TYPE
         model='audio_sphere',   # 'seldnet' - baseline CNN SELDnet, 'audio_sphere' - pre-trained AudioSphere encoder
-        audio_sphere_ckpt="/projects/0/prjs1261/ablations/ivloss_cosine/audio_sphere/InChannels=7/Fraction=1.0/CleanDataFraction=0.0/Model=AudioSphereIVCosine/ModelSize=base/LR=0.0002/BatchSize=32/NrSamples=4/Patching=frame-paper/MaskPatch=160/InputL=200/Cluster=False/IVLoss=cosine/step=20000.ckpt",  # local checkpoint for the AudioSphere encoder
 
         # build_model() reads these two; ablation tasks (100-111) set them from
         # the table above, legacy tasks fall back to audio_sphere_ckpt at the
