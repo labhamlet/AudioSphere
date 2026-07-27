@@ -18,6 +18,15 @@ import seldnet_model
 sys.path.append("..")
 
 
+def parameter_summary(model):
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {
+        "total": total,
+        "trainable": trainable,
+        "frozen": total - trainable,
+    }
+
 def build_model(data_in, data_out, params, device):
     """Select between the baseline SELDnet and the AudioSphere model."""
     if params['model'] == 'seldnet':
@@ -308,8 +317,17 @@ def main(argv):
 
         data_in, data_out = data_gen_train.get_data_sizes()
 
-        model = build_model(data_in, data_out, params, device)
+        model = build_model(data_in, data_out, params, device).to(device)
 
+
+        print("AudioSphere model:", parameter_summary(model))
+
+        head_trainable = sum(
+            p.numel()
+            for name, p in model.named_parameters()
+            if not name.startswith("audio_sphere.") and p.requires_grad
+        )
+        print("AudioSphere downstream head:", head_trainable)
         # Dump results in DCASE output format for calculating final scores
         dcase_output_val_folder = os.path.join(params['dcase_output_dir'], '{}_{}_val'.format(unique_name, strftime("%Y%m%d%H%M%S", gmtime())))
         cls_feature_class.delete_and_create_folder(dcase_output_val_folder)

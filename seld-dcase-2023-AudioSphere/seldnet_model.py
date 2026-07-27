@@ -206,7 +206,7 @@ class AudioSphereSELD(nn.Module):
         self.nb_classes = params['unique_classes']
         self.T_seld = out_shape[-2]
         self.freeze_encoder = freeze_encoder
-
+        proj_dim = 256
         # ---- AudioSphere encoder from a local checkpoint ----
         if audio_sphere is None:
             if ckpt_path is None:
@@ -245,7 +245,7 @@ class AudioSphereSELD(nn.Module):
 
         # ---- BiGRU ----
         self.gru = nn.GRU(
-            input_size=self.D, hidden_size=params['rnn_size'],
+            input_size=768, hidden_size=params['rnn_size'],
             num_layers=params['nb_rnn_layers'], batch_first=True,
             dropout=params['dropout_rate'], bidirectional=True,
         )
@@ -294,6 +294,11 @@ class AudioSphereSELD(nn.Module):
         attn = attn.softmax(dim=-1).unsqueeze(-1)      # (B, T, F, 1)
         return (z * attn).sum(dim=2)                   # (B, T, D)
 
+    def _mean_pool_freq(self, z_flat):
+        B, T, _ = z_flat.shape
+        z = z_flat.view(B, T, self.F, 768)
+        return z.mean(dim=2)  # (B, T, D_sp)
+    
     def _adapt_time(self, z):                          # (B,T,D)->(B,T_seld,D)
         if z.shape[1] == self.T_seld:
             return z
@@ -316,7 +321,7 @@ class AudioSphereSELD(nn.Module):
         z = self._adapt_time(z)                        # (B, T_seld, D)
 
         # ---- BiGRU + tanh multiplicative gating (as in SeldModel) ----
-        z, _ = self.gru(self.proj_gru(z))
+        z, _ = self.gru(z)
         z = torch.tanh(z)
         z = z[:, :, z.shape[-1] // 2:] * z[:, :, :z.shape[-1] // 2]
 
