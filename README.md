@@ -17,7 +17,6 @@ This repository has been validated with:
 conda create -n AudioSphere python=3.9 -y
 conda activate AudioSphere
 
-# Install GRAM-M specific dependencies
 pip install -r requirements.txt
 
 ```
@@ -28,25 +27,14 @@ pip install -r requirements.txt
 conda create -n AudioSphere-eval python=3.9 -y
 conda activate AudioSphere-eval
 
-# Install GRAM-M specific dependencies
 pip install -r requirements_eval.txt
 ```
 
 ## Model Training
 
-### AudioSphere-Time Model Training
-
-```bash
-python3 train.py data=audioset data.sr=32000 patching=time data.mask_patch=80 trainer.batch_size=32 trainer.steps=200000
-```
-
-### AudioSphere-Patch Model Training
-
 ```bash
 python3 train.py data=audioset data.sr=32000 patching=frame data.mask_patch=100 trainer.batch_size=32 trainer.steps=200000
 ```
-
-**Note:** Training requires approximately 72 hours on an A100 GPU. Models and TensorBoard logs are saved to the directory specified in `cfg.save_dir`.
 
 ## Downstream Evaluation
 
@@ -58,12 +46,6 @@ python3 train.py data=audioset data.sr=32000 patching=frame data.mask_patch=100 
    - Follow the instructions at https://hearbenchmark.com/hear-tasks.html to acquire the data
    - For convenience, download pre-processed 32000 Hz data directly from HEAR gs://hear2021-archive/tasks
    - Extract all files to a designated directory (`$TASKS_DIR`)
-
-2. **Pre-trained Model Weights:**
-   - Install the latest version of the huggingface with a pip install huggingface. Note: You should install huggingface after setting up the requirements.txt
-   - Then, to get the pretrained model weights, navigate to the huggingface directory.
-   - Run the gramt_binaural.py. This is the pretrained model, and the definition can be copied across the files. The most important point is to have RunTimeGRAMT discoverable via sys.
-
 
 #### Feature Extraction and Evaluation
 
@@ -77,7 +59,7 @@ task_name=dcase2016_task2-hear2021-full
 
 # Set model parameters
 weights=$MODEL_DIR
-model_name=hear_configs.GRAMT #GRAMTTime if Time based model
+model_name=hear_configs.AudioSphere
 strategy=raw
 use_mwmae_decoder=true
 in_channels=2
