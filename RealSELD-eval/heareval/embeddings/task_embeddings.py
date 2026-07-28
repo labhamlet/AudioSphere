@@ -192,6 +192,8 @@ def get_dataloader_for_embedding(
     data: Dict, audio_dir: Path, embedding: Embedding, batch_size: int = 64
 ):
     if embedding.type == TORCH or embedding.type == TENSORFLOW:
+        # RIRDIR and NOISEDIR can be None!
+        # RIRDIR and NOISEDIR can be None!
         return DataLoader(
             AudioFileDataset(
                 data=data, audio_dir=audio_dir, sample_rate=embedding.sample_rate
@@ -245,7 +247,6 @@ def get_labels_for_timestamps(labels: List, timestamps: np.ndarray, source: Opti
             if "direction" in event:
                 assert source is not None, "Got source None, please pass source_dyamics: (dynamic, static) in metadata"
             if "direction" in event and source == "static":
-                print("Adding")
                 tree.addi(event["start"], event["end"], (event["label"], event["direction"]))
             elif "direction" in event and source == "dynamic":
                 assert "source_idx" in event, "Events do not contain a source idx"
@@ -258,6 +259,9 @@ def get_labels_for_timestamps(labels: List, timestamps: np.ndarray, source: Opti
                 raise ValueError("Got direction and source not matching")
 
         labels_for_sound = []
+        # Update the binary vector of labels with intervals for each timestamp
+        # interval labels now is not only only, but could also be Tuple of str and List[float]
+        # List of float corresponds to the direction labels of the events.
         for j, t in enumerate(timestamps[i]):
             interval_labels: List[str | Tuple[str, List[float]]] = [interval.data for interval in tree[t]]
             #When we have a dynamic source, we select only one event of the same class!
@@ -280,8 +284,7 @@ def memmap_embeddings(
     split_name: str,
     embed_task_dir: Path,
     split_data: Dict,
-    audio_lengths : Optional[Dict[str, float]],
-    files
+    audio_lengths : Optional[Dict[str, float]]
 ):
     """
     Memmap all the embeddings to one file, and pickle all the labels.
@@ -295,7 +298,6 @@ def memmap_embeddings(
     # First count the number of embeddings total
     nembeddings = 0
     ndim: int
-
     for embedding_file in tqdm(embedding_files):
         assert embedding_file.exists()
         emb = np.load(embedding_file).astype(np.float32)
@@ -326,9 +328,9 @@ def memmap_embeddings(
     localization_labels_cartesian = []
     localization_labels_polar = []
     filename_timestamps = []
-    filenames = []
     for embedding_file in tqdm(embedding_files):
         emb = np.load(embedding_file)
+
         lbl = json.load(
             open(str(embedding_file).replace("embedding.npy", "target-labels.json"))
         )
@@ -349,7 +351,6 @@ def memmap_embeddings(
                 )
 
             labels.append(lbl)
-            filenames.append(str(embedding_file).replace("embedding.npy", ""))
             idx += 1
         elif metadata["embedding_type"] == "event":
             assert emb.ndim == 2
@@ -378,14 +379,6 @@ def memmap_embeddings(
         labels,
         open(
             embed_task_dir.joinpath(f"{split_name}.target-labels.pkl"),
-            "wb",
-        ),
-    )
-
-    pickle.dump(
-        filenames,
-        open(
-            embed_task_dir.joinpath(f"{split_name}.filenames.pkl"),
             "wb",
         ),
     )
@@ -462,11 +455,9 @@ def task_embeddings(
         outdir = embed_task_dir.joinpath(split)
         if not os.path.exists(outdir):
             os.makedirs(outdir)
-        files = [] 
+
         for audios, filenames, lengths in tqdm(dataloader):
             labels = [split_data[file] for file in filenames]
-            for file in filenames:
-                files.append(file)
 
             if metadata["embedding_type"] == "scene":
                 embeddings = embedding.get_scene_embedding_as_numpy(audios)
@@ -491,5 +482,4 @@ def task_embeddings(
                     f"Unknown embedding type: {metadata['embedding_type']}"
                 )
 
-        memmap_embeddings(outdir, prng, metadata, split, embed_task_dir, split_data, audio_lengths,
-                          files=files)
+        memmap_embeddings(outdir, prng, metadata, split, embed_task_dir, split_data, audio_lengths)
