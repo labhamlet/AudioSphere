@@ -123,21 +123,11 @@ def install_classwise_hook() -> Optional[str]:
     return None
 
 
-def accdoa_magnitude_range(
-    prediction: torch.Tensor, n_tracks: int = 1
-) -> Tuple[np.ndarray, np.ndarray]:
+def accdoa_magnitude_range(prediction: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Single-ACCDOA: prediction is (N, C, 3).
-    Multi-ACCDOA:  prediction is (N, n_tracks*3, C); magnitudes are taken per
-                   track and reduced across tracks, as test_epoch does.
+    prediction : (N, C, 3) flattened per-frame ACCDOA vectors.
     Returns (min, max) magnitude per class, each (C,).
     """
-    if n_tracks > 1:
-        n, _, nb_classes = prediction.shape
-        mag = prediction.reshape(n, n_tracks, 3, nb_classes).norm(dim=2)  # (N,K,C)
-        mag = mag.reshape(-1, nb_classes)
-        return (mag.min(dim=0).values.cpu().numpy(),
-                mag.max(dim=0).values.cpu().numpy())
     mag = prediction.norm(dim=-1)  # (N, C)
     return (
         mag.min(dim=0).values.cpu().numpy(),

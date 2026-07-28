@@ -1,15 +1,7 @@
 """
 Lightning modules for SELD/ACCDOA on hear-eval-kit.
 
-Two modules, one scoring path:
-
-* `SELDSequenceModule`  - frozen encoder, cached embeddings, temporal head.
-                          This is the supported path.
-* `SELDFinetuneModule`  - encoder in the graph, trained end to end. Requires the
-                          RuntimeAudioSphere patch in PATCHES.md, without which
-                          the encoder silently will not train.
-
-Both reuse `heareval.predictions.get_accdoa_events` / `get_ref_accdoa_events`
+Cached embeddings in, temporal single-ACCDOA head on top. Reuses `heareval.predictions.get_accdoa_events` / `get_ref_accdoa_events`
 and the existing `SELD` score function, so numbers are directly comparable to
 the frame-wise probe already in the kit.
 
@@ -25,11 +17,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import pytorch_lightning as pl
 import torch
-from torch import nn
 
-from .events import multi_accdoa_events
 from .heads import ACCDOAHead, masked_accdoa_mse
-from .losses import MSELossADPIT
 from .reporting import (
     accdoa_magnitude_range,
     install_classwise_hook,
@@ -41,7 +30,7 @@ from .reporting import (
     recover_classwise,
 )
 
-__all__ = ["SELDSequenceModule", "SELDFinetuneModule"]
+__all__ = ["SELDSequenceModule"]
 
 
 # --------------------------------------------------------------------------- #
@@ -69,8 +58,8 @@ def _flatten_valid_frames(outputs: Sequence[Dict[str, Any]]):
     return torch.cat(preds, dim=0), filenames, timestamps
 
 
-class _SELDBase(pl.LightningModule):
-    """Shared plumbing: head construction, steps, and SELD scoring."""
+class SELDSequenceModule(pl.LightningModule):
+    """Frozen encoder: cached embeddings in, temporal ACCDOA head on top."""
 
     def __init__(
         self,
@@ -89,25 +78,19 @@ class _SELDBase(pl.LightningModule):
         self._optim = conf.get("optim", torch.optim.Adam)
         self._lr = conf["lr"]
 
-        self.multi_accdoa = bool(conf.get("multi_accdoa", False))
-        self.n_tracks = int(conf.get("n_tracks", 3)) if self.multi_accdoa else 1
-        self.thresh_unify = float(conf.get("thresh_unify", 15.0))
-        self._adpit = MSELossADPIT() if self.multi_accdoa else None
-
         # Build the head from the conf by signature rather than a hand-written
         # list of conf.get(...) calls. A stale copy of this file silently
         # dropping a new head option is otherwise invisible - the model builds,
         # trains, and reports plausible numbers with the wrong architecture.
         # The parameter count is the only tell, so it is printed below.
         head_args = set(inspect.signature(ACCDOAHead.__init__).parameters)
-        head_args -= {"self", "in_dim", "nlabels", "n_tracks"}
+        head_args -= {"self", "in_dim", "nlabels"}
         head_kwargs = {k: conf[k] for k in head_args if k in conf}
         ignored = sorted(head_args - set(head_kwargs))
 
         self.head = ACCDOAHead(
             in_dim=embedding_size,
             nlabels=nlabels,
-            n_tracks=self.n_tracks,
             **head_kwargs,
         )
 
@@ -146,18 +129,18 @@ class _SELDBase(pl.LightningModule):
 
     # -- steps -------------------------------------------------------------- #
     def _loss(self, pred, target, mask):
-        if self._adpit is not None:
-            return self._adpit(pred, target, mask)
         return masked_accdoa_mse(pred, target, mask)
 
     def training_step(self, batch, batch_idx):
-        pred = self(batch["x"], batch["mask"])
+        # input_mask is at the encoder frame rate (attention runs before
+        # pooling); mask is at the label rate (loss, timestamps, scoring).
+        pred = self(batch["x"], batch.get("input_mask", batch["mask"]))
         loss = self._loss(pred, batch["y"], batch["mask"])
         self.log("train_loss", loss)
         return loss
 
     def _eval_step(self, batch, name: str):
-        pred = self(batch["x"], batch["mask"])
+        pred = self(batch["x"], batch.get("input_mask", batch["mask"]))
         self.log(
             f"{name}_loss",
             self._loss(pred, batch["y"], batch["mask"]),
@@ -214,15 +197,9 @@ class _SELDBase(pl.LightningModule):
 
         prediction, filenames, timestamps = _flatten_valid_frames(outputs)
 
-        if self.multi_accdoa:
-            pred_events, diff, max_frames = multi_accdoa_events(
-                prediction, filenames, timestamps, self.nlabels,
-                thresh_unify=self.thresh_unify,
-            )
-        else:
-            pred_events, diff, max_frames = get_accdoa_events(
-                prediction, filenames, timestamps, self.nlabels
-            )
+        pred_events, diff, max_frames = get_accdoa_events(
+            prediction, filenames, timestamps, self.nlabels
+        )
         ref_events, max_ref_frames = get_ref_accdoa_events(
             self.target_events[name],
             self.target_timestamps[name],
@@ -234,7 +211,24 @@ class _SELDBase(pl.LightningModule):
         # hop becomes 12 fps instead of 12.5 and the one-second segmentation
         # drifts against the reference. check_alignment.py catches this before
         # training; warn here too in case it was skipped.
-        nb_pred_frames_1s = int(1000 // diff)
+        if diff <= 0:
+            # No file had more than one frame, so the spacing cannot be
+            # measured. int(1000 // 0) would raise here with nothing to point at.
+            if not self._nb_label_frames_1s:
+                raise RuntimeError(
+                    "Cannot infer the prediction frame rate: no file has more "
+                    "than one predicted frame, and the task metadata has no "
+                    "_nb_label_frames_1s to fall back on."
+                )
+            self.print(
+                f"  WARNING: timestamp spacing unmeasurable (single-frame "
+                f"files); falling back to _nb_label_frames_1s="
+                f"{self._nb_label_frames_1s}"
+            )
+            nb_pred_frames_1s = int(self._nb_label_frames_1s)
+            diff = 1000.0 / nb_pred_frames_1s
+        else:
+            nb_pred_frames_1s = int(1000 // diff)
         if abs(1000.0 / diff - nb_pred_frames_1s) > 1e-6:
             self.print(
                 f"WARNING: embedding hop {diff:g} ms does not divide 1000; the "
@@ -324,7 +318,7 @@ class _SELDBase(pl.LightningModule):
         header = ", ".join(f"{k}: {v:0.3f}" for k, v in labels.items())
         self.print(f"epoch {self.current_epoch} [{name}] {header}")
 
-        mag_min, mag_max = accdoa_magnitude_range(prediction, self.n_tracks)
+        mag_min, mag_max = accdoa_magnitude_range(prediction)
         self.print(format_magnitude_table(mag_min, mag_max, self.idx_to_label))
 
         # Cross-check against the reported aggregate: under macro averaging the
@@ -368,70 +362,3 @@ class _SELDBase(pl.LightningModule):
 
     def configure_optimizers(self):
         return self._optim(self.parameters(), lr=self._lr)
-
-
-# --------------------------------------------------------------------------- #
-class SELDSequenceModule(_SELDBase):
-    """Frozen encoder: cached embeddings in, temporal ACCDOA head on top."""
-
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        return self.head(x, mask)
-
-
-# --------------------------------------------------------------------------- #
-class SELDFinetuneModule(_SELDBase):
-    """
-    End-to-end: raw audio -> HEAR encoder -> temporal ACCDOA head.
-
-    `hear_module` is the imported HEAR module (the thing exposing
-    `get_timestamp_embeddings`), `encoder` is the loaded model. We call the
-    module directly rather than going through `heareval.embeddings.Embedding`,
-    whose wrapper runs under `torch.no_grad()` and would detach the encoder.
-    """
-
-    def __init__(self, *args, hear_module: Any, encoder: nn.Module,
-                 freeze_encoder_epochs: int = 0, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.hear_module = hear_module
-        self.encoder = encoder
-        self.freeze_encoder_epochs = freeze_encoder_epochs
-        self._grad_checked = False
-
-    def _encoder_frozen(self) -> bool:
-        return self.current_epoch < self.freeze_encoder_epochs
-
-    def embed(self, audio: torch.Tensor) -> torch.Tensor:
-        frozen = self._encoder_frozen()
-
-        # Encoders that gate their own no_grad (RuntimeAudioSphere does, once
-        # patched) need telling. No-op on encoders without the attribute.
-        if hasattr(self.encoder, "freeze_encoder"):
-            self.encoder.freeze_encoder = frozen
-
-        if frozen:
-            with torch.no_grad():
-                emb, _ = self.hear_module.get_timestamp_embeddings(audio, self.encoder)
-            return emb.detach()
-
-        emb, _ = self.hear_module.get_timestamp_embeddings(audio, self.encoder)
-        if not self._grad_checked:
-            self._grad_checked = True
-            if self.training and not emb.requires_grad:
-                raise RuntimeError(
-                    "Encoder embeddings came back detached, so nothing upstream "
-                    "of the head will train. RuntimeAudioSphere.encode() wraps "
-                    "its forward in torch.no_grad() - see PATCHES.md."
-                )
-        return emb
-
-    def forward(self, audio: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        return self.head(self.embed(audio), mask)
-
-    def configure_optimizers(self):
-        """Discriminative learning rates: the pretrained encoder gets less."""
-        encoder_lr = self.hparams.get("encoder_lr", self._lr * 0.1)
-        groups = [
-            {"params": self.head.parameters(), "lr": self._lr},
-            {"params": self.encoder.parameters(), "lr": encoder_lr},
-        ]
-        return self._optim(groups, lr=self._lr)

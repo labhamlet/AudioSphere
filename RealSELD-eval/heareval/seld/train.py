@@ -2,7 +2,7 @@
 SELD entry points, mirroring `heareval.predictions.task_predictions` but
 sequence-aware.
 
-    from heareval.seld.train import seld_predictions, seld_finetune
+    from heareval.seld.train import seld_predictions
 
 Both reuse the kit's `available_scores["SELD"]`, its task metadata, and its
 split logic, so results sit next to the existing probe results.
@@ -32,28 +32,25 @@ from ._compat import (
     load_timestamps,
     map_to_frames,
 )
-from .data import (
-    SELDAudioChunkDataset,
-    build_embedding_dataset,
-    probe_frame_grid,
-    references_and_timestamps,
-    seld_collate,
-)
-from .lightning import SELDFinetuneModule, SELDSequenceModule
+from .data import build_embedding_dataset, seld_collate
+from .lightning import SELDSequenceModule
 
 __all__ = ["SELD_PARAM_GRID", "AUDIOSPHERE_PARITY_GRID",
-           "AUDIOSPHERE_PROJ_GRID", "MULTI_ACCDOA_GRID",
-           "seld_predictions", "seld_finetune"]
+           "AUDIOSPHERE_PROJ_GRID", "seld_predictions"]
 
 
 # seq_len is in encoder frames. At HEAR_TIMESTAMP_HOP_MS=100 that is 100 ms per
 # frame, so 20 == SELDNet's 2 s window and 60 == 6 s. Longer helps here: SELDNet
 # could afford 2 s because its conv stack had already pooled time 10x, whereas
 # the attention layers see one token per frame.
-
 SELD_PARAM_GRID: Dict[str, List[Any]] = {
     "hidden_dim": [256],
     "proj_dim": [None],
+    # AudioSphere's raw strategy emits F*D = 8*768 = 6144 per frame. Attention
+    # pooling over the 8 frequency patches recovers a 768-wide token stream
+    # instead of flattening 6144 features into one Linear. FrequencyPool falls
+    # back to "none" automatically when in_dim == embed_dim, so this same config
+    # is correct for encoders that already pool.
     "freq_pool": ["attention"],
     "embed_dim": [768],
     "gru_merge": ["concat"],
@@ -63,7 +60,6 @@ SELD_PARAM_GRID: Dict[str, List[Any]] = {
     "dropout": [0.05],
     "pool_factor": [1],
     "seq_len": [20, 60],
-    "multi_accdoa": [False],
     "lr": [1e-3, 3.2e-4, 1e-4],
     "batch_size": [32],
     "max_epochs": [200],
@@ -72,28 +68,45 @@ SELD_PARAM_GRID: Dict[str, List[Any]] = {
     "optim": [torch.optim.Adam],
 }
 
+
+# Reproduction of AudioSphereSELD (seldnet_model.py) with parameters.py, mapped
+# onto this head. One point, no search - a grid search would defeat the purpose.
+# This targets AudioSphereSELD, NOT the CNN SeldModel baseline.
 AUDIOSPHERE_PARITY_GRID: Dict[str, List[Any]] = {
+    # AudioSphereSELD: LayerNorm(F*D) -> attention freq pool -> GRU directly.
     "freq_pool": ["attention"],
     "embed_dim": [768],
     "norm_position": ["pre_pool"],
     "use_projection": [False],
     "proj_dim": [None],
+    # parameters.py: rnn_size=128, nb_rnn_layers=2, and SeldModel's tanh
+    # multiplicative merge of the two GRU directions.
     "hidden_dim": [128],
     "gru_layers": [2],
     "gru_merge": ["gate"],
+    # nb_self_attn_layers=2, nb_heads=8
     "attn_layers": [2],
     "attn_heads": [8],
+    # nb_fnn_layers=1, fnn_size=128
     "fnn_layers": [1],
     "fnn_size": [128],
     "dropout": [0.05],
+    # AudioSphereSELD has no dropout before the FNN head.
     "out_dropout": [0.0],
+    # 100 ms frames already == the label grid, so no temporal pooling, and
+    # label_sequence_length=20 is 20 frames.
     "pool_factor": [1],
-    "seq_len": [60],
-    "batch_size": [48],
+    "seq_len": [20],
+    "eval_seq_len": [None],       # None = evaluate at the training seq_len
+    "batch_size": [128],
     "lr": [1e-3],
-    "max_epochs": [125],
+    "max_epochs": [100],
+    # parameters.py sets patience=nb_epochs, so early stopping never fires.
+    # Validate every epoch: the repo selects the best epoch by val SELD, and
+    # checking every 25th would leave only four candidates out of a hundred.
     "patience": [100],
     "check_val_every_n_epoch": [1],
+    # cls_data_generator tiles sequences; it does not random-crop.
     "random_crop": [False],
     "optim": [torch.optim.Adam],
 }
@@ -110,27 +123,55 @@ AUDIOSPHERE_PROJ_GRID: Dict[str, List[Any]] = {
 }
 
 
-# Multi-ACCDOA with ADPIT. Same head as the AudioSphere parity preset, but three
-# tracks per class, so same-class overlap is representable and the localization
-# recall ceiling that check_alignment reports no longer applies.
-MULTI_ACCDOA_GRID: Dict[str, List[Any]] = {
-    **{k: list(v) for k, v in AUDIOSPHERE_PARITY_GRID.items()},
-    "multi_accdoa": [True],
-    "n_tracks": [3],
-    # parameters.py: thresh_unify=15 degrees.
-    "thresh_unify": [15],
-}
-
-
 def _seld_scores(metadata: Dict[str, Any], label_to_idx: Dict[str, int]):
+    """
+    Build the score functions named in metadata["evaluation"], mirroring
+    heareval.predictions.task_predictions.
+
+    Two exist and they take different constructor arguments:
+
+    "SELD"    - the DCASE2020+ metric. Continuous DOAs, location-aware F at a
+                doa_threshold, localization recall over matched tracks.
+                Produces the classwise array this package reports.
+
+    "OldSELD" - the DCASE2019-era metric, used by tau2019 and the tut2018
+                splits. Buckets DOA onto an azimuth x elevation grid at
+                doa_resolution degrees and scores frame recall rather than
+                localization recall, so LE has a floor near the bin size and
+                there is no per-class breakdown.
+    """
     params = metadata.get("scoring_params", {})
-    return [
-        available_scores["SELD"](
-            label_to_idx=label_to_idx,
-            doa_threshold=params.get("doa_threshold", 20),
-            average=params.get("average", "macro"),
-        )
-    ]
+    names = metadata.get("evaluation", ["SELD"])
+    scores = []
+    for name in names:
+        if name == "SELD":
+            scores.append(available_scores["SELD"](
+                label_to_idx=label_to_idx,
+                doa_threshold=params.get("doa_threshold", 20),
+                average=params.get("average", "macro"),
+            ))
+        elif name == "OldSELD":
+            missing = [k for k in ("azimuth_limits", "elevation_limits",
+                                   "doa_resolution") if k not in params]
+            if missing:
+                raise ValueError(
+                    f"OldSELD needs {missing} in scoring_params; got "
+                    f"{sorted(params)}"
+                )
+            scores.append(available_scores["OldSELD"](
+                label_to_idx=label_to_idx,
+                azimuth_list=params["azimuth_limits"],
+                elevation_list=params["elevation_limits"],
+                _doa_resolution=params["doa_resolution"],
+            ))
+        else:
+            raise ValueError(
+                f"metadata['evaluation'] names {name!r}, which this runner does "
+                f"not build. Supported: SELD, OldSELD."
+            )
+    if not scores:
+        raise ValueError("metadata['evaluation'] is empty")
+    return scores
 
 
 def _reference_frames(
@@ -211,6 +252,7 @@ def seld_predictions(
     in_memory: bool = True,
     grid: Optional[Dict[str, List[Any]]] = None,
     seed: int = 42,
+    tag: str = "",
 ) -> Dict[str, Any]:
     """Frozen encoder + temporal ACCDOA head over cached HEAR embeddings."""
     logger = logger or logging.getLogger(__name__)
@@ -237,9 +279,19 @@ def seld_predictions(
     test_events, test_ts = _reference_frames(embedding_path, metadata, split["test"])
 
     def make_loader(conf, names, *, train: bool):
+        # eval_seq_len decouples the inference chunk length from the training
+        # one. seq_len sets both by default, which confounds a seq_len ablation:
+        # a longer chunk means fewer frames sit at a boundary with no left
+        # context (5% at 20, 1.7% at 60), so longer windows look better at test
+        # time whether or not the training benefited. Evaluating every arm at
+        # one fixed length separates the two.
+        seq_len = (
+            conf["seq_len"] if train
+            else int(conf.get("eval_seq_len") or conf["seq_len"])
+        )
         dataset = build_embedding_dataset(
             embedding_path, names, label_to_idx, nlabels,
-            seq_len=conf["seq_len"],
+            seq_len=seq_len,
             seq_hop=None,                  # tiling stride == seq_len
             pool_factor=conf["pool_factor"],
             in_memory=in_memory,
@@ -250,7 +302,6 @@ def seld_predictions(
             # conf["random_crop"] must be honoured here: the reproduction
             # presets set it False because cls_data_generator tiles.
             random_crop=train and bool(conf.get("random_crop", True)),
-            multi_accdoa=bool(conf.get("multi_accdoa", False)),
         )
         return DataLoader(
             dataset,
@@ -302,26 +353,45 @@ def seld_predictions(
         if checkpoint.best_model_score is None:
             logger.warning("Grid point %d produced no validation score; skipping", i + 1)
             continue
+        # Keep only the score, the conf and the checkpoint path. A fitted
+        # Trainer holds its dataloaders, which hold the in-memory embeddings -
+        # about 7 GB per grid point on tau-scale data. Retaining five of them
+        # to pick a winner is a straightforward way to run out of RAM.
         results.append({
             "score": float(checkpoint.best_model_score),
             "conf": conf,
-            "trainer": trainer,
             "ckpt": checkpoint.best_model_path,
         })
+        del trainer, checkpoint
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if not results:
         raise RuntimeError("No grid point produced a validation score.")
 
     results.sort(key=lambda r: r["score"], reverse=maximize)
     best = results[0]
-    for other in results[1:]:          # release the losers before testing
-        other["trainer"] = None
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     logger.info("Best val SELD score %.4f with %s", best["score"], best["conf"])
-    test_results = best["trainer"].test(
+
+    # Fresh Trainer for the test pass; the fitted ones were released above.
+    test_module = SELDSequenceModule(
+        embedding_size=embedding_size,
+        nlabels=nlabels,
+        label_to_idx=label_to_idx,
+        scores=scores,
+        target_events={"val": val_events, "test": test_events},
+        target_timestamps={"val": val_ts, "test": test_ts},
+        conf=best["conf"],
+        source=metadata.get("source_dynamics", "static"),
+        nb_label_frames_1s=metadata.get("_nb_label_frames_1s"),
+    )
+    test_trainer, _ = _trainer(
+        best["conf"], gpus, Path("logs").joinpath(embedding_path.name),
+        deterministic, mode=mode,
+    )
+    test_results = test_trainer.test(
+        test_module,
         ckpt_path=best["ckpt"],
         dataloaders=make_loader(best["conf"], split["test"], train=False),
     )[0]
@@ -330,113 +400,12 @@ def seld_predictions(
         "hparams": {k: str(v) for k, v in best["conf"].items()},
         "embedding_path": str(embedding_path),
         "seed": seed,
+        "tag": tag,
     })
-    # Seed-suffixed filenames so a multi-seed sweep does not overwrite itself.
-    suffix = "" if seed == 42 else f"-seed{seed}"
+    # Suffix so a sweep does not overwrite itself: --tag for ablations,
+    # --seed for repeats.
+    suffix = (f"-{tag}" if tag else "") + ("" if seed == 42 else f"-seed{seed}")
     embedding_path.joinpath(f"test.predicted-scores-seld{suffix}.json").write_text(
-        json.dumps(test_results, indent=4)
-    )
-    return test_results
-
-
-# --------------------------------------------------------------------------- #
-def seld_finetune(
-    task_path: Path,
-    embedding_path: Path,
-    hear_module: Any,
-    encoder: torch.nn.Module,
-    embedding_size: int,
-    conf: Dict[str, Any],
-    gpus: Optional[int] = 1,
-    logger: Optional[logging.Logger] = None,
-    chunk_seconds: float = 6.0,
-    freeze_encoder_epochs: int = 1,
-    deterministic: bool = True,
-) -> Dict[str, Any]:
-    """
-    End-to-end fine-tuning on raw audio. Requires the RuntimeAudioSphere patch
-    in PATCHES.md; without it the encoder silently stays frozen.
-
-    `task_path` is the hearpreprocess task directory (holding
-    `<sample_rate>/<split>/*.wav` and `<split>.json`); `embedding_path` supplies
-    `task_metadata.json` and `labelvocabulary.csv`.
-    """
-    logger = logger or logging.getLogger(__name__)
-    task_path, embedding_path = Path(task_path), Path(embedding_path)
-    if deterministic:
-        pl.seed_everything(42, workers=True)
-
-    metadata = json.load(embedding_path.joinpath("task_metadata.json").open())
-    label_vocab, nlabels = label_vocab_nlabels(embedding_path)
-    label_to_idx = label_vocab_as_dict(label_vocab, key="label", value="idx")
-    scores = _seld_scores(metadata, label_to_idx)
-    split = get_splits_from_metadata(metadata)[0]
-
-    sample_rate = encoder.sample_rate
-    chunk_samples = int(round(chunk_seconds * sample_rate))
-    frame_grid = probe_frame_grid(hear_module, encoder, chunk_samples, sample_rate)
-    logger.info("Encoder emits %d frames per %.1fs chunk", len(frame_grid), chunk_seconds)
-
-    # encode() pads up to a whole number of input_tdim windows and then strips an
-    # integer number of frames off the tail, so a chunk that is not a whole
-    # number of windows leaves a fractional frame and drifts the grid.
-    input_tdim = getattr(encoder, "input_size", (None,))[0]
-    if input_tdim:
-        window_seconds = input_tdim / 100.0        # 10 ms mel hop
-        ratio = chunk_seconds / window_seconds
-        if abs(ratio - round(ratio)) > 1e-6:
-            logger.warning(
-                "chunk_seconds=%.3f is not a multiple of the encoder window "
-                "(%.2fs); frame timestamps may drift at chunk boundaries.",
-                chunk_seconds, window_seconds,
-            )
-
-    def dataset(name: str, hop: Optional[float]):
-        return SELDAudioChunkDataset(
-            task_path, name, sample_rate, label_to_idx, nlabels,
-            frame_grid_ms=frame_grid,
-            chunk_seconds=chunk_seconds,
-            hop_seconds=hop,
-        )
-
-    train_ds = dataset(split["train"][0], conf.get("train_hop_seconds"))
-    val_ds = dataset(split["valid"][0], None)     # tile exactly at eval
-    test_ds = dataset(split["test"][0], None)
-
-    val_events, val_ts = references_and_timestamps(val_ds)
-    test_events, test_ts = references_and_timestamps(test_ds)
-
-    def loader(ds, train: bool):
-        return DataLoader(
-            ds, batch_size=conf["batch_size"], shuffle=train,
-            collate_fn=seld_collate, num_workers=conf.get("num_workers", 4),
-            pin_memory=True,
-        )
-
-    module = SELDFinetuneModule(
-        embedding_size,
-        nlabels,
-        label_to_idx,
-        scores,
-        {"val": val_events, "test": test_events},
-        {"val": val_ts, "test": test_ts},
-        conf,
-        source=metadata.get("source_dynamics", "static"),
-        nb_label_frames_1s=metadata.get("_nb_label_frames_1s"),
-        hear_module=hear_module,
-        encoder=encoder,
-        freeze_encoder_epochs=freeze_encoder_epochs,
-    )
-    trainer, checkpoint = _trainer(
-        conf, gpus, Path("logs").joinpath(embedding_path.name), deterministic
-    )
-    trainer.fit(module, loader(train_ds, True), loader(val_ds, False))
-
-    test_results = trainer.test(
-        ckpt_path=checkpoint.best_model_path, dataloaders=loader(test_ds, False)
-    )[0]
-    test_results["validation_score"] = float(checkpoint.best_model_score)
-    embedding_path.joinpath("test.predicted-scores-seld-finetune.json").write_text(
         json.dumps(test_results, indent=4)
     )
     return test_results

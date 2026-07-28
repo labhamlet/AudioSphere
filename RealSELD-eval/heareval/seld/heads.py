@@ -155,14 +155,19 @@ class ACCDOAHead(nn.Module):
         fnn_layers: int = 0,
         fnn_size: Optional[int] = None,
         out_dropout: Optional[float] = None,
-        n_tracks: int = 1,
         bounded: bool = True,
     ):
         super().__init__()
         if hidden_dim % 2:
             raise ValueError("hidden_dim must be even (bidirectional GRU)")
-        if hidden_dim % attn_heads:
-            raise ValueError("hidden_dim must be divisible by attn_heads")
+        if attn_layers and hidden_dim % attn_heads:
+            # Only a constraint when there is attention to run. Checking it
+            # unconditionally blocks attn_layers=0 with an odd hidden_dim, which
+            # is a legitimate configuration (pure recurrent head).
+            raise ValueError(
+                f"hidden_dim ({hidden_dim}) must be divisible by attn_heads "
+                f"({attn_heads}) when attn_layers > 0"
+            )
         if gru_merge not in ("concat", "gate"):
             raise ValueError(f"unknown gru_merge {gru_merge!r}")
         if freq_pool != "none" and embed_dim is None:
@@ -174,7 +179,6 @@ class ACCDOAHead(nn.Module):
             )
 
         self.nlabels = nlabels
-        self.n_tracks = n_tracks
         self.pool_factor = pool_factor
         self.gru_merge = gru_merge
         self.bounded = bounded
@@ -244,7 +248,7 @@ class ACCDOAHead(nn.Module):
             fnn.append(nn.Linear(width, fnn_size))
             width = fnn_size
         self.fnn = nn.ModuleList(fnn)
-        self.out = nn.Linear(width, n_tracks * 3 * nlabels)
+        self.out = nn.Linear(width, 3 * nlabels)
 
     def forward(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -265,6 +269,18 @@ class ACCDOAHead(nn.Module):
 
         key_padding = None
         if mask is not None and self.attn_blocks:
+            if mask.shape[1] != h.shape[1]:
+                # A mask at the head's OUTPUT rate was passed where the input
+                # rate is needed. Attention runs before temporal pooling, so it
+                # needs one entry per input frame. Expand rather than fail
+                # inside MultiheadAttention with an opaque shape assertion.
+                if h.shape[1] % mask.shape[1] == 0:
+                    mask = mask.repeat_interleave(h.shape[1] // mask.shape[1], dim=1)
+                else:
+                    raise ValueError(
+                        f"mask has {mask.shape[1]} frames but the attention "
+                        f"input has {h.shape[1]}; pass input_mask, not mask"
+                    )
             key_padding = mask < 0.5  # True == ignore
             # A fully-padded row makes softmax produce NaNs; keep one frame alive.
             all_pad = key_padding.all(dim=1)
@@ -286,14 +302,9 @@ class ACCDOAHead(nn.Module):
         h = self.out(h)
         if self.bounded:
             h = torch.tanh(h)
-        # Two layouts, because the two decoders want different things.
-        # Single-ACCDOA: (B, T, C, 3), which get_accdoa_labels indexes per class.
-        # Multi-ACCDOA:  (B, T, n_tracks*3, C), matching the flat
-        #   [track0_x_allclasses, track0_y..., track1_x...] ordering that
-        #   MSELoss_ADPIT and get_multi_accdoa_labels assume.
-        if self.n_tracks == 1:
-            return h.reshape(h.shape[0], h.shape[1], self.nlabels, 3)
-        return h.reshape(h.shape[0], h.shape[1], self.n_tracks * 3, self.nlabels)
+        # (B, T, C, 3): heareval's get_accdoa_labels indexes per class and reads
+        # the trailing axis as x, y, z.
+        return h.reshape(h.shape[0], h.shape[1], self.nlabels, 3)
 
 
 def masked_accdoa_mse(

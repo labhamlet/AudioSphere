@@ -31,10 +31,10 @@ from tqdm import tqdm
 import heareval.gpu_max_mem as gpu_max_mem
 
 from .check_alignment import main as check_alignment_main
+from .selfcheck import check as selfcheck
 from .train import (
     AUDIOSPHERE_PARITY_GRID,
     AUDIOSPHERE_PROJ_GRID,
-    MULTI_ACCDOA_GRID,
     SELD_PARAM_GRID,
     seld_predictions,
 )
@@ -51,7 +51,6 @@ _PRESETS = {
     "audiosphere": AUDIOSPHERE_PARITY_GRID,
     "seldnet": AUDIOSPHERE_PARITY_GRID,
     "audiosphere-proj": AUDIOSPHERE_PROJ_GRID,
-    "multi-accdoa": MULTI_ACCDOA_GRID,
 }
 _PRESET_NAMES = list(_PRESETS)
 
@@ -107,7 +106,7 @@ def _override_grid(preset: str = "default", **overrides: Optional[Any]):
     help="'audiosphere' reproduces seldnet_model.AudioSphereSELD exactly - one "
     "grid point, no search; 'seldnet' is an alias. 'audiosphere-proj' adds "
     "proj_gru (LayerNorm -> Linear(768,256) -> GELU -> Dropout) before the GRU. "
-    "'multi-accdoa' is 3 tracks with ADPIT. (Default: default)",
+    "(Default: default)",
 )
 @click.option(
     "--grid-points", default=8, type=click.INT,
@@ -132,6 +131,12 @@ def _override_grid(preset: str = "default", **overrides: Optional[Any]):
     "multi-seed sweep does not overwrite itself.",
 )
 @click.option(
+    "--tag", default="", type=str,
+    help="Suffix for the done-file and the scores JSON. Needed for ablations: "
+    "without it the second run in a sweep sees prediction-done-seld.json and "
+    "skips.",
+)
+@click.option(
     "--shuffle", default=False, type=click.BOOL,
     help="Shuffle tasks? (Default: False)",
 )
@@ -143,11 +148,25 @@ def _override_grid(preset: str = "default", **overrides: Optional[Any]):
 )
 # ---- head architecture ---------------------------------------------------- #
 @click.option("--seq-len", default=None, type=click.INT,
-              help="Pin the sequence length, in encoder frames.")
+              help="Pin the training sequence length, in encoder frames.")
+@click.option("--eval-seq-len", default=None, type=click.INT,
+              help="Inference chunk length, if it should differ from --seq-len. "
+              "Evaluate every arm of a seq_len sweep at one fixed value to "
+              "separate 'longer context helps the model' from 'longer chunks "
+              "put fewer frames at a boundary'.")
 @click.option("--pool-factor", default=None, type=click.INT,
               help="Pin the head's temporal pooling factor.")
 @click.option("--hidden-dim", default=None, type=click.INT,
               help="Pin the head width.")
+@click.option("--gru-layers", default=None, type=click.INT,
+              help="Number of BiGRU layers.")
+@click.option("--attn-layers", default=None, type=click.INT,
+              help="Number of self-attention blocks after the GRU. 0 removes "
+              "them, leaving a pure recurrent head.")
+@click.option("--attn-heads", default=None, type=click.INT,
+              help="Attention heads. Must divide hidden-dim.")
+@click.option("--dropout", default=None, type=click.FLOAT,
+              help="Dropout through the head.")
 @click.option("--proj-dim", default=None, type=click.INT,
               help="Width of proj_gru feeding the GRU. Defaults to hidden-dim.")
 @click.option("--embed-dim", default=None, type=click.INT,
@@ -173,14 +192,6 @@ def _override_grid(preset: str = "default", **overrides: Optional[Any]):
     help="Where the LayerNorm goes: input_norm over F*D (pre_pool), proj_gru's "
     "LayerNorm over the pooled token (post_pool), both, or neither.",
 )
-# ---- objective ------------------------------------------------------------ #
-@click.option(
-    "--multi-accdoa/--single-accdoa", default=None,
-    help="Three tracks per class with ADPIT, instead of one. Lifts the "
-    "same-class recall ceiling that check_alignment reports.",
-)
-@click.option("--thresh-unify", default=None, type=click.FLOAT,
-              help="Degrees below which two tracks are treated as one source.")
 # ---- optimisation --------------------------------------------------------- #
 @click.option(
     "--random-crop/--no-random-crop", default=None,
@@ -209,19 +220,23 @@ def runner(
     in_memory: bool = True,
     deterministic: bool = True,
     seed: int = 42,
+    tag: str = "",
     shuffle: bool = False,
     skip_checks: bool = False,
     seq_len: Optional[int] = None,
+    eval_seq_len: Optional[int] = None,
     pool_factor: Optional[int] = None,
     hidden_dim: Optional[int] = None,
+    gru_layers: Optional[int] = None,
+    attn_layers: Optional[int] = None,
+    attn_heads: Optional[int] = None,
+    dropout: Optional[float] = None,
     proj_dim: Optional[int] = None,
     embed_dim: Optional[int] = None,
     freq_pool: Optional[str] = None,
     gru_merge: Optional[str] = None,
     use_projection: Optional[bool] = None,
     norm_position: Optional[str] = None,
-    multi_accdoa: Optional[bool] = None,
-    thresh_unify: Optional[float] = None,
     random_crop: Optional[bool] = None,
     lr: Optional[float] = None,
     batch_size: Optional[int] = None,
@@ -237,6 +252,19 @@ def runner(
     # deterministic=True path raises at the first matmul.
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
 
+    # A stale file fails here, naming itself, rather than as a TypeError
+    # partway through building a model - or worse, as a silently wrong
+    # architecture that trains and reports plausible numbers.
+    if not skip_checks:
+        consistent, problems = selfcheck()
+        if not consistent:
+            for problem in problems:
+                log.error("%s", problem)
+            stale = sorted({p.split(":")[0] for p in problems})
+            raise SystemExit(
+                f"heareval/seld/ has stale file(s): {', '.join(stale)}. "
+                f"Run `python3 -m heareval.seld.selfcheck` for detail."
+            )
 
     if gpus is not None:
         gpus = json.loads(gpus)
@@ -248,16 +276,19 @@ def runner(
     grid, clobbered = _override_grid(
         preset,
         seq_len=seq_len,
+        eval_seq_len=eval_seq_len,
         pool_factor=pool_factor,
         hidden_dim=hidden_dim,
+        gru_layers=gru_layers,
+        attn_layers=attn_layers,
+        attn_heads=attn_heads,
+        dropout=dropout,
         proj_dim=proj_dim,
         embed_dim=embed_dim,
         freq_pool=freq_pool,
         gru_merge=gru_merge,
         use_projection=use_projection,
         norm_position=norm_position,
-        multi_accdoa=multi_accdoa,
-        thresh_unify=thresh_unify,
         random_crop=random_crop,
         lr=lr,
         batch_size=batch_size,
@@ -280,8 +311,8 @@ def runner(
         if not task_path.is_dir():
             raise ValueError(f"{task_path} should be a directory")
 
-        seed_suffix = "" if seed == 42 else f"-seed{seed}"
-        done_file = task_path.joinpath(f"prediction-done-seld{seed_suffix}.json")
+        suffix = (f"-{tag}" if tag else "") + ("" if seed == 42 else f"-seed{seed}")
+        done_file = task_path.joinpath(f"prediction-done-seld{suffix}.json")
         if done_file.exists():
             # We already did this
             continue
@@ -338,6 +369,7 @@ def runner(
             grid=grid,
             logger=logger,
             seed=seed,
+            tag=tag,
         )
         sys.stdout.flush()
         gpu_max_mem_used = gpu_max_mem.measure()

@@ -180,10 +180,6 @@ class RuntimeAudioSphere(torch.nn.Module):
         # ------------------------------------------------ checkpoint load --- #
         if not skip_weights:
             result = self.model.load_state_dict(weights["state_dict"], strict=False)
-            # strict=False still hard-fails on shape mismatches, so if we get
-            # here shapes agree — but a checkpoint/class mix-up also shows up
-            # as *missing* encoder weights silently left at random init, which
-            # produces garbage embeddings, not a crash. Refuse that.
             critical = [
                 k for k in result.missing_keys
                 if k.startswith(("encoder.", "patch_embed.", "cls_token"))
@@ -201,8 +197,6 @@ class RuntimeAudioSphere(torch.nn.Module):
                     f"unexpected={result.unexpected_keys}"
                 )
 
-        # ---------------------------------------------- indicator shim ------ #
-        # AFTER loading: keys must match the checkpoint before wrapping.
         if getattr(self.model, "add_mask_indicator", False):
             self.model.patch_embed.proj = _ZeroIndicatorProj(
                 self.model.patch_embed.proj

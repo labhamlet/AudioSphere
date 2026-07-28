@@ -1,5 +1,5 @@
 """
-Sequence-aware datasets for SELD / ACCDOA on top of hear-eval-kit.
+Sequence-aware dataset for SELD / single-ACCDOA on top of hear-eval-kit.
 
 Why this module exists
 ----------------------
@@ -13,17 +13,6 @@ each file's frames contiguously into the memmap, appending exactly one
 `(slug, timestamp)` pair per frame to `<split>.filename-timestamps.json` in the
 same order.  That JSON is therefore a faithful index into the memmap, and we can
 recover per-file frame runs from it *without re-embedding anything*.
-
-Two datasets are provided:
-
-* `SELDSequenceEmbeddingDataset` - frozen encoder / linear-probe style. Reads
-  the cached memmap and emits contiguous (T, D) chunks.
-* `SELDAudioChunkDataset` - fine-tuning. Reads raw audio and emits fixed-length
-  waveform chunks with frame-aligned ACCDOA targets, so the encoder can stay in
-  the graph.
-
-Both emit the same dict schema so one Lightning module and one scoring path
-serve both.
 """
 
 from __future__ import annotations
@@ -42,17 +31,13 @@ from torch.utils.data import ConcatDataset, Dataset
 
 __all__ = [
     "FileSpan",
-    "adpit_targets",
     "spherical_to_cartesian",
-    "build_file_spans",
     "accdoa_targets",
     "frame_labels_from_events",
+    "build_file_spans",
     "SELDSequenceEmbeddingDataset",
-    "SELDAudioChunkDataset",
-    "seld_collate",
     "build_embedding_dataset",
-    "probe_frame_grid",
-    "references_and_timestamps",
+    "seld_collate",
 ]
 
 
@@ -79,8 +64,9 @@ def accdoa_targets(
     standard single-ACCDOA encoding: ||v|| < 0.5 means "inactive".
 
     NOTE: single-ACCDOA cannot represent two simultaneous instances of the same
-    class.  If that happens here the last one wins.  If your task has same-class
-    overlap you want multi-ACCDOA + ADPIT, which is out of scope for this module.
+    class.  If that happens here the last one wins, and the reference side still
+    counts both, so the extra source is an unavoidable false negative.
+    `check_alignment` reports how much of the data this affects.
     """
     y = torch.zeros((len(frame_labels), nlabels, 3), dtype=torch.float32)
     for t, frame in enumerate(frame_labels):
@@ -96,42 +82,6 @@ def accdoa_targets(
     return y
 
 
-def adpit_targets(
-    frame_labels: Sequence[Sequence[Any]],
-    label_to_idx: Dict[str, int],
-    nlabels: int,
-) -> torch.Tensor:
-    """
-    Multi-ACCDOA / ADPIT targets, shaped (T, 6, 4, nlabels) to match
-    `cls_feature_class.get_adpit_labels_for_file`.
-
-    The six slots are the baseline's dummy tracks: A0 for a class with one
-    source in the frame, B0/B1 for two, C0/C1/C2 for three or more. Axis 1 of
-    the size-4 dimension is activity, 1:4 are x, y, z. The ADPIT loss gates the
-    coordinates by activity, so inactive slots contribute zeros.
-
-    Same-class sources are ordered by (azimuth, elevation) rather than metadata
-    order: the permutation-invariant loss makes the ordering irrelevant to
-    training, and a deterministic one makes runs reproducible - IntervalTree
-    query results come back unordered.
-    """
-    y = torch.zeros((len(frame_labels), 6, 4, nlabels), dtype=torch.float32)
-    slots_for = {1: (0,), 2: (1, 2)}
-    for t, frame in enumerate(frame_labels):
-        by_class: Dict[int, list] = {}
-        for entry in frame:
-            by_class.setdefault(label_to_idx[str(entry[0])], []).append(entry[1])
-        for cls, doas in by_class.items():
-            doas = sorted(doas, key=lambda d: (float(d[0]), float(d[1])))
-            slots = slots_for.get(len(doas), (3, 4, 5))
-            for slot, doa in zip(slots, doas):
-                y[t, slot, 0, cls] = 1.0
-                y[t, slot, 1:, cls] = torch.from_numpy(
-                    spherical_to_cartesian(doa[0], doa[1])
-                )
-    return y
-
-
 def frame_labels_from_events(
     events: Sequence[Dict[str, Any]],
     timestamps_ms: Sequence[float],
@@ -139,8 +89,8 @@ def frame_labels_from_events(
     """
     Sample a list of {label, start, end, direction} events onto a frame grid.
 
-    Mirrors `heareval.predictions.map_to_frames` so the fine-tuning path and the
-    frozen-embedding path produce byte-identical reference structures.
+    Mirrors `heareval.predictions.map_to_frames`, including the half-open
+    interval, so the reference structures agree exactly.
     """
     tree = IntervalTree()
     for ev in events:
@@ -153,7 +103,7 @@ def frame_labels_from_events(
 
 
 # --------------------------------------------------------------------------- #
-# frozen-encoder path: contiguous chunks out of the cached memmap
+# contiguous chunks out of the cached memmap
 # --------------------------------------------------------------------------- #
 @dataclass
 class FileSpan:
@@ -213,14 +163,12 @@ class SELDSequenceEmbeddingDataset(Dataset):
               Use seq_hop == seq_len for val/test, otherwise a timestamp will be
               predicted twice and the scorer will silently keep only one of them.
     pool_factor : temporal downsampling applied by the head, e.g. 5 to go from a
-              20 ms embedding hop to the 100 ms DCASE label grid. Targets and
-              timestamps are pooled here so they line up with the head's output.
-              Leave at 1 to evaluate at the embedding rate (the scorer already
-              handles pred-rate != label-rate via _nb_pred_frames_1s).
+              20 ms embedding hop to the 100 ms DCASE label grid. Targets,
+              timestamps and the mask are pooled here so they line up with the
+              head's output. Leave at 1 to evaluate at the embedding rate.
     random_crop : draw a fresh random offset into the file on every __getitem__
               instead of using the fixed tiling. Epoch size is unchanged (one
-              crop per tiling slot), so this is free augmentation: the head sees
-              different views of the same recording each epoch. Offsets are
+              crop per tiling slot), so this is free augmentation. Offsets are
               snapped to a multiple of pool_factor so the pooling blocks keep the
               same phase they have at eval time.
               Training only: leave it off for val/test, where the tiling has to
@@ -239,7 +187,6 @@ class SELDSequenceEmbeddingDataset(Dataset):
         in_memory: bool = True,
         drop_incomplete: bool = False,
         random_crop: bool = False,
-        multi_accdoa: bool = False,
     ):
         embedding_path = Path(embedding_path)
         if seq_len % pool_factor:
@@ -251,7 +198,6 @@ class SELDSequenceEmbeddingDataset(Dataset):
         self.nlabels = nlabels
         self.split_name = split_name
         self.random_crop = random_crop
-        self.multi_accdoa = multi_accdoa
         self._rng: Optional[np.random.Generator] = None
 
         dim = tuple(
@@ -283,10 +229,7 @@ class SELDSequenceEmbeddingDataset(Dataset):
         )
         if len(raw_labels) != self.n_frames_total:
             raise RuntimeError("labels and embeddings disagree on frame count")
-        self.targets = (
-            adpit_targets(raw_labels, label_to_idx, nlabels) if multi_accdoa
-            else accdoa_targets(raw_labels, label_to_idx, nlabels)
-        )
+        self.targets = accdoa_targets(raw_labels, label_to_idx, nlabels)
 
         self.spans = build_file_spans(embedding_path, split_name)
 
@@ -354,11 +297,19 @@ class SELDSequenceEmbeddingDataset(Dataset):
         ts = np.zeros(self.seq_len, dtype=np.float64)
         ts[:take] = span.timestamps[off : off + take]
 
+        # Two masks, because they live at different rates once pool_factor > 1:
+        #   input_mask (seq_len,)          - for the head's attention, which runs
+        #                                    before temporal pooling
+        #   mask       (seq_len // p,)     - for the loss, timestamps and scoring,
+        #                                    which are at the head's output rate
+        # They are the same tensor when pool_factor == 1.
+        input_mask = mask.clone()
         y, mask, ts = self._pool(y, mask, ts)
         return {
             "x": x,
             "y": y,
             "mask": mask,
+            "input_mask": input_mask,
             "timestamps": torch.from_numpy(ts),
             "filename": span.filename,
         }
@@ -381,157 +332,12 @@ def build_embedding_dataset(
     return parts[0] if len(parts) == 1 else ConcatDataset(parts)
 
 
-# --------------------------------------------------------------------------- #
-# fine-tuning path: raw audio chunks
-# --------------------------------------------------------------------------- #
-def probe_frame_grid(
-    module,
-    model,
-    chunk_samples: int,
-    sample_rate: int,
-    in_channels: Optional[int] = None,
-) -> np.ndarray:
-    """
-    Run the HEAR module once on silence to learn its frame grid for a chunk of
-    `chunk_samples`.  Returns relative timestamps in ms, shape (T,).
-
-    Doing this instead of assuming a hop means the targets are aligned to
-    whatever padding / windowing / resampling the encoder actually does. For
-    AudioSphere in particular the grid depends on `input_tdim`, the patch
-    tstride, and the HEAR_TIMESTAMP_HOP_MS environment variable, so guessing is
-    a bad idea.
-
-    `in_channels` defaults to `model.in_channels` when present. The dummy tensor
-    is shaped like `heareval.embeddings.AudioFileDataset` output — (B, samples)
-    for mono, (B, samples, channels) for multichannel — because that is what the
-    encoder was fed when the cached embeddings were made.
-    """
-    if in_channels is None:
-        in_channels = int(getattr(model, "in_channels", 1))
-    device = next(model.parameters()).device
-    shape = (1, chunk_samples) if in_channels == 1 else (1, chunk_samples, in_channels)
-    dummy = torch.zeros(shape, device=device)
-    with torch.no_grad():
-        _, timestamps = module.get_timestamp_embeddings(dummy, model)
-    ts = timestamps[0] if timestamps.dim() == 2 else timestamps
-    return ts.detach().cpu().numpy().astype(np.float64)
-
-
-class SELDAudioChunkDataset(Dataset):
-    """
-    Fixed-length waveform chunks + frame-aligned ACCDOA targets.
-
-    `frame_grid_ms` must come from `probe_frame_grid` for the same
-    `chunk_seconds` and encoder, otherwise labels and predictions drift apart.
-    """
-
-    def __init__(
-        self,
-        task_path: Path,
-        split_name: str,
-        sample_rate: int,
-        label_to_idx: Dict[str, int],
-        nlabels: int,
-        frame_grid_ms: np.ndarray,
-        chunk_seconds: float = 6.0,
-        hop_seconds: Optional[float] = None,
-    ):
-        import soundfile as sf  # local import: only the finetune path needs it
-
-        self.sf = sf
-        task_path = Path(task_path)
-        self.audio_dir = task_path.joinpath(str(sample_rate), split_name)
-        self.sample_rate = sample_rate
-        self.nlabels = nlabels
-        self.label_to_idx = label_to_idx
-        self.frame_grid_ms = np.asarray(frame_grid_ms, dtype=np.float64)
-        self.chunk_samples = int(round(chunk_seconds * sample_rate))
-        self.hop_samples = int(round((hop_seconds or chunk_seconds) * sample_rate))
-
-        self.events: Dict[str, List[Dict[str, Any]]] = json.load(
-            open(task_path.joinpath(f"{split_name}.json"))
-        )
-
-        self.index: List[Tuple[str, int, int]] = []  # (filename, start_sample, n_valid)
-        for filename in self.events:
-            path = self.audio_dir.joinpath(filename)
-            n = sf.info(str(path)).frames
-            for start in range(0, max(n, 1), self.hop_samples):
-                self.index.append((filename, start, min(self.chunk_samples, n - start)))
-                if start + self.chunk_samples >= n:
-                    break
-
-    def __len__(self) -> int:
-        return len(self.index)
-
-    def frame_times_ms(self, start_sample: int) -> np.ndarray:
-        """Absolute frame timestamps (ms) for the chunk starting at `start_sample`."""
-        return self.frame_grid_ms + 1000.0 * start_sample / self.sample_rate
-
-    def __getitem__(self, i: int) -> Dict[str, Any]:
-        filename, start, n_valid = self.index[i]
-        path = self.audio_dir.joinpath(filename)
-        # Same read as heareval.embeddings.AudioFileDataset: no always_2d, no
-        # transpose. Multichannel comes back as (samples, channels) and mono as
-        # (samples,), which is the layout the encoder saw during embedding
-        # extraction. Transposing here would silently feed ambisonic channels in
-        # as time.
-        audio, sr = self.sf.read(
-            str(path), start=start, frames=self.chunk_samples, dtype="float32"
-        )
-        if sr != self.sample_rate:
-            raise ValueError(f"{filename}: expected {self.sample_rate} Hz, got {sr}")
-
-        pad = self.chunk_samples - audio.shape[0]
-        if pad > 0:
-            pad_width = ((0, pad),) + ((0, 0),) * (audio.ndim - 1)
-            audio = np.pad(audio, pad_width)
-        x = torch.from_numpy(np.ascontiguousarray(audio))
-
-        ts = self.frame_times_ms(start)
-        labels = frame_labels_from_events(self.events[filename], ts)
-        y = accdoa_targets(labels, self.label_to_idx, self.nlabels)
-
-        valid_ms = 1000.0 * (start + n_valid) / self.sample_rate
-        mask = torch.from_numpy((ts < valid_ms).astype(np.float32))
-
-        return {
-            "x": x,
-            "y": y,
-            "mask": mask,
-            "timestamps": torch.from_numpy(ts),
-            "filename": filename,
-        }
-
-
-def references_and_timestamps(
-    dataset: SELDAudioChunkDataset,
-) -> Tuple[Dict[str, List[List[Any]]], Dict[str, List[float]]]:
-    """
-    Build the `(references, ref_timestamps)` pair that
-    `heareval.predictions.get_ref_accdoa_events` expects, on exactly the frame
-    grid this dataset predicts on.  Only meaningful when hop == chunk length.
-    """
-    per_file: Dict[str, List[float]] = {}
-    for filename, start, n_valid in dataset.index:
-        ts = dataset.frame_times_ms(start)
-        valid_ms = 1000.0 * (start + n_valid) / dataset.sample_rate
-        per_file.setdefault(filename, []).extend(ts[ts < valid_ms].tolist())
-
-    references, timestamps = {}, {}
-    for filename, ts in per_file.items():
-        ts = sorted(set(ts))
-        timestamps[filename] = ts
-        references[filename] = frame_labels_from_events(dataset.events[filename], ts)
-    return references, timestamps
-
-
-# --------------------------------------------------------------------------- #
 def seld_collate(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Stack tensors, keep filenames as a plain list of strings."""
+    keys = ("x", "y", "mask", "timestamps")
+    keys += ("input_mask",) if "input_mask" in batch[0] else ()
     out: Dict[str, Any] = {
-        key: torch.stack([b[key] for b in batch])
-        for key in ("x", "y", "mask", "timestamps")
+        key: torch.stack([b[key] for b in batch]) for key in keys
     }
     out["filename"] = [b["filename"] for b in batch]
     return out
