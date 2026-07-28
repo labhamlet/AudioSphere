@@ -237,12 +237,16 @@ class AudioSphereSELD(nn.Module):
 
         self.D = embed_dim              # token dim
         self.F = f_patches              # nr. frequency patches (F*D == raw last dim)
-
+        proj_dim=256 
+        dropout = params.get('dropout_rate', 0.1)
         # ---- Attention frequency pooling (learned query over F patches) ----
         self.input_norm = nn.LayerNorm(self.F * self.D)
         self.q_freq = nn.Parameter(torch.randn(self.D) * 0.02)
         self.k_proj_freq = nn.Linear(self.D, self.D, bias=False)
-
+        self.gru_proj = nn.Sequential(
+            nn.LayerNorm(self.D_sp), nn.Linear(self.D_sp, proj_dim),
+            nn.GELU(), nn.Dropout(dropout))
+    
         # ---- BiGRU ----
         self.gru = nn.GRU(
             input_size=self.D, hidden_size=params['rnn_size'],
@@ -313,7 +317,7 @@ class AudioSphereSELD(nn.Module):
         z = self._adapt_time(z)                        # (B, T_seld, D)
 
         # ---- BiGRU + tanh multiplicative gating (as in SeldModel) ----
-        z, _ = self.gru(z)
+        z, _ = self.gru(self.gru_proj(z))
         z = torch.tanh(z)
         z = z[:, :, z.shape[-1] // 2:] * z[:, :, :z.shape[-1] // 2]
 
