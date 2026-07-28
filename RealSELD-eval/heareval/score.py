@@ -971,22 +971,23 @@ class SELD(ScoreFunction):
     def __init__(
         self,
         label_to_idx: Dict[str, int],
-        doa_threshold:float,
-        average:str,
+        doa_threshold: float,
+        average: str,
         scores: Tuple[str],
         name: Optional[str] = None,
-        maximize: bool = True,
+        maximize: bool = False,
     ):
-        
+ 
         super().__init__(label_to_idx=label_to_idx, name=name, maximize=maximize)
         self.scores = scores
         self.params = {}
         self.doa_threshold = doa_threshold
-        self.average=average
+        self.average = average
         self.nb_classes = len(self.label_to_idx)
-
-    #MAX FRAMES passed here, but not used. It is for the completeness of the whole class.
-    #max_frames refer to the maximum number of frames in the dataset.
+        # Populated by _compute so callers can report per-class results; the
+        # metric builds this array and it was previously discarded.
+        self.classwise_results = None
+ 
     def _compute(self,
         pred_dicts,
         ref_dicts,
@@ -994,38 +995,85 @@ class SELD(ScoreFunction):
         _nb_pred_frames_1s,
         _max_frames,
         _max_ref_frames) -> Tuple[Tuple[str, float], ...]:
-        
+ 
         overall_scores = {}
-
-        eval = SELDMetrics(nb_classes=self.nb_classes, doa_threshold=self.doa_threshold, average=self.average)
-        for file_name in pred_dicts.keys():
-            pred_dict = pred_dicts[file_name]
-            ref_dict = ref_dicts[file_name]
-            _max_frame = _max_frames[file_name]
-            _max_ref_frame = _max_ref_frames[file_name]
-            #Our prediction dict is in cartesian format, so convert it to polar!
+ 
+        eval = SELDMetrics(
+            nb_classes=self.nb_classes,
+            doa_threshold=self.doa_threshold,
+            average=self.average,
+        )
+ 
+        # (1) Iterate the union, not just the predictions. A file the model
+        #     fired on nowhere is absent from pred_dicts, and skipping it drops
+        #     its references instead of counting them as misses.
+        file_names = list(dict.fromkeys(list(ref_dicts.keys()) + list(pred_dicts.keys())))
+ 
+        for file_name in file_names:
+            pred_dict = pred_dicts.get(file_name, {})
+            ref_dict = ref_dicts.get(file_name, {})
+            _max_frame = _max_frames.get(file_name, 0)
+            _max_ref_frame = _max_ref_frames.get(file_name, 0)
+ 
+            # Our prediction dict is in cartesian format, so convert it to polar!
             pred_dict = convert_output_format_cartesian_to_polar(pred_dict)
+ 
             if _nb_label_frames_1s == _nb_pred_frames_1s:
-                try:
-                    max_frames = max(list(pred_dict.keys()))
-                except: 
-                    max_frames = 1
-                pred_labels = segment_labels(pred_dict, max_frames, nb_frames_1s=_nb_label_frames_1s)
-                ref_labels = segment_labels(ref_dict, max_frames, nb_frames_1s=_nb_label_frames_1s)
+                max_frames = max(ref_dict.keys(), default=0)
+ 
+                pred_labels = segment_labels(
+                    pred_dict, max_frames, nb_frames_1s=_nb_label_frames_1s
+                )
+                ref_labels = segment_labels(
+                    ref_dict, max_frames, nb_frames_1s=_nb_label_frames_1s
+                )
             else:
-                pred_labels = segment_labels(pred_dict, _max_frames, nb_frames_1s=_nb_pred_frames_1s)
-                ref_labels = segment_labels(ref_dict, _max_ref_frames, nb_frames_1s=_nb_label_frames_1s)
+                # (3) The old code passed _max_frames / _max_ref_frames here -
+                #     dicts keyed by filename - into an int context, which
+                #     raises. Use the per-file values, and derive a common
+                #     block count so update_seld_scores cannot index a block
+                #     that the other side does not have.
+                last_ref = max(_max_ref_frame, max(ref_dict.keys(), default=0)) + 1
+                last_pred = max(_max_frame, max(pred_dict.keys(), default=0)) + 1
+                nb_blocks = max(
+                    int(np.ceil(last_ref / float(_nb_label_frames_1s))),
+                    int(np.ceil(last_pred / float(_nb_pred_frames_1s))),
+                )
+                pred_labels = segment_labels(
+                    pred_dict, nb_blocks * _nb_pred_frames_1s,
+                    nb_frames_1s=_nb_pred_frames_1s,
+                )
+                ref_labels = segment_labels(
+                    ref_dict, nb_blocks * _nb_label_frames_1s,
+                    nb_frames_1s=_nb_label_frames_1s,
+                )
+ 
             eval.update_seld_scores(pred_labels, ref_labels)
-
+ 
         # Overall SED and DOA scores
         ER, F, LE, LR, seld_scr, classwise_results = eval.compute_seld_scores()
+ 
+        # (4) Keep the classwise array and the accumulator instead of dropping
+        #     them. ER = (S+D+I)/Nref, so Nref==0 means nothing was scored and
+        #     the numbers below are vacuous rather than bad.
+        self.classwise_results = classwise_results
+        self.seld_metrics = eval
+        if float(np.sum(eval._Nref)) == 0.0:
+            print(
+                "WARNING: SELD scored 0 reference tracks. ER/F/LR are 0 and LE "
+                "is 180 by construction, so SELD reads 0.75 regardless of the "
+                "model. Check that predictions and references share filenames.",
+                flush=True,
+            )
+ 
         overall_scores["ER"] = ER
-        overall_scores["F"] = F 
+        overall_scores["F"] = F
         overall_scores["LE"] = LE
-        overall_scores["LR"] = LR 
+        overall_scores["LR"] = LR
         overall_scores["SELD"] = seld_scr
-
+ 
         return tuple([(score, float(overall_scores[score])) for score in self.scores])
+ 
 
 class SegmentBasedScore(SoundEventScore):
     """
