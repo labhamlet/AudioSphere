@@ -12,8 +12,88 @@ from src.patching import PatchStrategy
 from .feature_helper_audio_sphere import FeatureExtractor, get_timestamps
 import torch.nn.functional as F
 
+import os
+import warnings
+ 
+import torch
+import torch.nn.functional as F
+ 
+ENV_TARGET = "HEAR_TIMESTAMP_HOP_MS"
+ENV_NATIVE = "HEAR_NATIVE_HOP_MS"
+DEFAULT_NATIVE_HOP_MS = 80.0
+ 
+ 
+def _env_float(name, default=None):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "" or raw.strip().lower() in ("null", "none"):
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r} is not a number") from None
+    if value <= 0:
+        raise ValueError(f"{name}={raw!r} must be positive")
+    return value
+ 
+ 
+def native_hop_ms():
+    return _env_float(ENV_NATIVE, DEFAULT_NATIVE_HOP_MS)
+ 
+ 
+def target_hop_ms():
+    """None when no resampling was requested."""
+    return _env_float(ENV_TARGET, None)
+ 
+ 
+def target_frames(n_native, native_hop, target_hop):
+    """How many frames the same span covers at the target hop."""
+    return max(1, int(round(n_native * native_hop / target_hop)))
+ 
+ 
+def resample_timestamps(embeddings, timestamps, *,
+                        native_hop=None, target_hop=None):
+    """
+    embeddings: (B, T, D) at the native hop
+    timestamps: (B, T) or (T,) frame times in MILLISECONDS
+    Returns (embeddings, timestamps) on the target grid. The timestamps are
+    always regenerated at the hop the embeddings are on, so pooled output is
+    never paired with the native time axis.
+ 
+    Explicit native_hop/target_hop override the environment; both in ms.
+    """
+    if native_hop is None:
+        native_hop = native_hop_ms()
+    if target_hop is None:
+        target_hop = target_hop_ms()
+ 
+    if embeddings.dim() != 3:
+        raise ValueError(f"expected (B, T, D) embeddings, got {tuple(embeddings.shape)}")
+ 
+    n_native = embeddings.shape[1]
+    hop = native_hop if target_hop is None else target_hop
+    n_frames = (n_native if target_hop is None
+                else target_frames(n_native, native_hop, target_hop))
+ 
+    if target_hop is not None and n_frames > n_native:
+        warnings.warn(
+            f"{ENV_TARGET}={target_hop} is finer than the native hop {native_hop} "
+            f"ms ({n_native} -> {n_frames} frames); adaptive_avg_pool1d duplicates "
+            f"frames rather than adding detail.",
+            stacklevel=2,
+        )
+ 
+    if n_frames != n_native:
+        # (B,T,D) -> (B,D,T) -> pool -> (B,T',D)
+        embeddings = F.adaptive_avg_pool1d(
+            embeddings.transpose(1, 2), n_frames
+        ).transpose(1, 2)
+ 
+    new_ts = torch.arange(n_frames, dtype=torch.float32,
+                          device=embeddings.device) * hop
+    if timestamps is not None and timestamps.dim() == 2:
+        new_ts = new_ts.unsqueeze(0).expand(embeddings.shape[0], -1).contiguous()
 
-
+    return embeddings, new_ts
 
 def _to_bool(v) -> bool:
     """model_options arrive as JSON strings: 'false' is truthy in Python."""
@@ -100,10 +180,6 @@ class RuntimeAudioSphere(torch.nn.Module):
         # ------------------------------------------------ checkpoint load --- #
         if not skip_weights:
             result = self.model.load_state_dict(weights["state_dict"], strict=False)
-            # strict=False still hard-fails on shape mismatches, so if we get
-            # here shapes agree — but a checkpoint/class mix-up also shows up
-            # as *missing* encoder weights silently left at random init, which
-            # produces garbage embeddings, not a crash. Refuse that.
             critical = [
                 k for k in result.missing_keys
                 if k.startswith(("encoder.", "patch_embed.", "cls_token"))
@@ -121,8 +197,6 @@ class RuntimeAudioSphere(torch.nn.Module):
                     f"unexpected={result.unexpected_keys}"
                 )
 
-        # ---------------------------------------------- indicator shim ------ #
-        # AFTER loading: keys must match the checkpoint before wrapping.
         if getattr(self.model, "add_mask_indicator", False):
             self.model.patch_embed.proj = _ZeroIndicatorProj(
                 self.model.patch_embed.proj
@@ -193,11 +267,11 @@ class RuntimeAudioSphere(torch.nn.Module):
 
     def get_scene_embeddings(self, audio):
         x = self.audio2feats(audio)
-        # This takes the mean embedding across the scene!
         x = torch.mean(x, dim=1)
         return x
 
     def get_timestamp_embeddings(self, audio):
         x = self.audio2feats(audio)
         ts = get_timestamps(self.sample_rate, audio, x)
+        x, ts = resample_timestamps(x, ts)
         return x, ts

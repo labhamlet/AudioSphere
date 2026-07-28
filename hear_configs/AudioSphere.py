@@ -70,3 +70,4 @@ def get_scene_embeddings(audio, model):
 
 def get_timestamp_embeddings(audio, model):
     return model.get_timestamp_embeddings(audio)
+    
