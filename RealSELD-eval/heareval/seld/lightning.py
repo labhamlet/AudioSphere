@@ -1,15 +1,3 @@
-"""
-Lightning modules for SELD/ACCDOA on hear-eval-kit.
-
-Cached embeddings in, temporal single-ACCDOA head on top. Reuses `heareval.predictions.get_accdoa_events` / `get_ref_accdoa_events`
-and the existing `SELD` score function, so numbers are directly comparable to
-the frame-wise probe already in the kit.
-
-Targets PyTorch Lightning 1.x (`validation_epoch_end`, `Trainer(gpus=...)`),
-matching the rest of hear-eval-kit. On Lightning 2.x, rename the two
-`*_epoch_end` hooks to `on_*_epoch_end` and buffer step outputs yourself.
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -33,7 +21,6 @@ from .reporting import (
 __all__ = ["SELDSequenceModule"]
 
 
-# --------------------------------------------------------------------------- #
 def _scalar_hparams(conf: Dict[str, Any]) -> Dict[str, Any]:
     """CSVLogger chokes on classes and callables; keep only loggable scalars."""
     return {k: v for k, v in conf.items() if isinstance(v, (int, float, str, bool))}
@@ -78,11 +65,6 @@ class SELDSequenceModule(pl.LightningModule):
         self._optim = conf.get("optim", torch.optim.Adam)
         self._lr = conf["lr"]
 
-        # Build the head from the conf by signature rather than a hand-written
-        # list of conf.get(...) calls. A stale copy of this file silently
-        # dropping a new head option is otherwise invisible - the model builds,
-        # trains, and reports plausible numbers with the wrong architecture.
-        # The parameter count is the only tell, so it is printed below.
         head_args = set(inspect.signature(ACCDOAHead.__init__).parameters)
         head_args -= {"self", "in_dim", "nlabels"}
         head_kwargs = {k: conf[k] for k in head_args if k in conf}
@@ -94,7 +76,6 @@ class SELDSequenceModule(pl.LightningModule):
             **head_kwargs,
         )
 
-        # NOT self.print(): that touches self.trainer, which raises here.
         n_params = sum(p.numel() for p in self.head.parameters())
         print(f"[seld] head input {embedding_size} -> {self.head.freq_pool}", flush=True)
         print(f"[seld] head parameters: {n_params:,}", flush=True)
@@ -112,28 +93,16 @@ class SELDSequenceModule(pl.LightningModule):
         self._nb_label_frames_1s = nb_label_frames_1s
         self.idx_to_label = {idx: label for label, idx in label_to_idx.items()}
         self._warned_no_classwise = False
-        # Lightning 1.x passes step outputs into *_epoch_end; 2.x removed that
-        # argument and expects you to buffer them yourself. Buffer either way
-        # and implement both hook spellings.
-        #
-        # Both hooks fire on 1.9, so scoring must be idempotent within an epoch:
-        # a per-epoch flag rather than "the buffer is empty by then", which
-        # would depend on Lightning's internal hook ordering. Getting that wrong
-        # means running the SELD metric twice per validation - Hungarian
-        # matching over every segment, so far from free - and logging each
-        # score twice.
-        # NOT self._buffers: that is nn.Module's registered-buffer OrderedDict,
-        # and overwriting it makes .to(device) try to call .to() on a list.
         self._epoch_outputs: Dict[str, List[Dict[str, Any]]] = {"val": [], "test": []}
         self._scored: Dict[str, bool] = {"val": False, "test": False}
 
-    # -- steps -------------------------------------------------------------- #
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        return self.head(x, mask)
+
     def _loss(self, pred, target, mask):
         return masked_accdoa_mse(pred, target, mask)
 
     def training_step(self, batch, batch_idx):
-        # input_mask is at the encoder frame rate (attention runs before
-        # pooling); mask is at the label rate (loss, timestamps, scoring).
         pred = self(batch["x"], batch.get("input_mask", batch["mask"]))
         loss = self._loss(pred, batch["y"], batch["mask"])
         self.log("train_loss", loss)
@@ -177,21 +146,12 @@ class SELDSequenceModule(pl.LightningModule):
         self._scored["test"] = False
         self._epoch_outputs["test"].clear()
 
-    # -- Lightning 1.x: outputs are passed in ------------------------------- #
     def validation_epoch_end(self, outputs):
         self._maybe_score("val", outputs)
 
     def test_epoch_end(self, outputs):
         self._maybe_score("test", outputs)
 
-    # -- Lightning 2.x: score from our own buffer --------------------------- #
-    def on_validation_epoch_end(self):
-        self._maybe_score("val", self._epoch_outputs["val"])
-
-    def on_test_epoch_end(self):
-        self._maybe_score("test", self._epoch_outputs["test"])
-
-    # -- scoring ------------------------------------------------------------ #
     def _score(self, name: str, outputs: Sequence[Dict[str, Any]]) -> None:
         from ._compat import get_accdoa_events, get_ref_accdoa_events
 
@@ -207,12 +167,7 @@ class SELDSequenceModule(pl.LightningModule):
             label_to_idx=self.label_to_idx,
         )
 
-        # int(1000 // diff) is the kit's own inference and it truncates. An 80 ms
-        # hop becomes 12 fps instead of 12.5 and the one-second segmentation
-        # drifts against the reference. check_alignment.py catches this before
-        # training; warn here too in case it was skipped.
         if diff <= 0:
-            # No file had more than one frame, so the spacing cannot be
             # measured. int(1000 // 0) would raise here with nothing to point at.
             if not self._nb_label_frames_1s:
                 raise RuntimeError(
@@ -240,11 +195,6 @@ class SELDSequenceModule(pl.LightningModule):
             nb_pred_frames_1s if self.source == "static" else self._nb_label_frames_1s
         )
 
-        # An empty comparison scores 0.75, not 1.0: with Nref == 0 the metric's
-        # ER = (S+D+I)/(Nref+eps) is 0/eps = 0, F and LR are 0/eps = 0, and LE
-        # hits the DE_TP == 0 guard at 180 -> mean(0, 1, 1, 1) = 0.75. That
-        # looks like a mediocre model rather than a broken pipeline, so count
-        # both sides and say so explicitly.
         n_pred = sum(len(d) for f in pred_events.values() for d in f.values())
         n_ref = sum(len(d) for f in ref_events.values() for d in f.values())
         self.print(
@@ -287,7 +237,8 @@ class SELDSequenceModule(pl.LightningModule):
             else:
                 raise ValueError(f"Unexpected score return type {type(ret)}")
 
-        self.log(f"{name}_score", end_scores[f"{name}_{self.scores[0]}"], logger=True)
+        self.log(f"{name}_score", end_scores[f"{name}_{self.scores[0]}"],
+                 logger=True)
         for key, value in end_scores.items():
             self.log(key, value, prog_bar=True, logger=True)
 
@@ -321,22 +272,20 @@ class SELDSequenceModule(pl.LightningModule):
         mag_min, mag_max = accdoa_magnitude_range(prediction)
         self.print(format_magnitude_table(mag_min, mag_max, self.idx_to_label))
 
-        # Cross-check against the reported aggregate: under macro averaging the
-        # scalar is the mean of the classwise SELD row, so a mismatch means the
-        # captured array belongs to a different SELDMetrics instance.
         primary = end_scores.get(f"{name}_{self.scores[0]}")
         classwise = recover_classwise(self.scores[0], self.nlabels, primary)
         if classwise is None:
             # Wrap SELDMetrics.compute_seld_scores so the next epoch captures it.
             # Cannot help this epoch: the score has already been computed.
-            target = install_classwise_hook()
             if not self._warned_no_classwise:
                 self._warned_no_classwise = True
+                target = install_classwise_hook()
                 if target:
                     self.print(
-                        f"  (classwise breakdown: hooked SELDMetrics in {target}; "
-                        f"it will appear from the next validation onwards, and "
-                        f"only if its mean matches the reported score)"
+                        f"  (classwise breakdown: hooked SELDMetrics in "
+                        f"{target}; it will appear from the next validation "
+                        f"onwards, and only if its mean matches the reported "
+                        f"score)"
                     )
                 else:
                     self.print(

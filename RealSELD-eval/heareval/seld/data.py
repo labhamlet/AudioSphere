@@ -1,20 +1,3 @@
-"""
-Sequence-aware dataset for SELD / single-ACCDOA on top of hear-eval-kit.
-
-Why this module exists
-----------------------
-`heareval.predictions.SplitMemmapDataset` yields ONE frame at a time and the
-training DataLoader shuffles those frames.  That is fine for a per-frame MLP
-probe but destroys the temporal structure a GRU / self-attention head needs.
-
-The important observation is that the frames are *not* scrambled on disk.
-`heareval.embeddings.memmap_embeddings` shuffles the *file list* and then writes
-each file's frames contiguously into the memmap, appending exactly one
-`(slug, timestamp)` pair per frame to `<split>.filename-timestamps.json` in the
-same order.  That JSON is therefore a faithful index into the memmap, and we can
-recover per-file frame runs from it *without re-embedding anything*.
-"""
-
 from __future__ import annotations
 
 import json
@@ -41,9 +24,7 @@ __all__ = [
 ]
 
 
-# --------------------------------------------------------------------------- #
 # geometry / label helpers
-# --------------------------------------------------------------------------- #
 def spherical_to_cartesian(az_deg: float, el_deg: float) -> np.ndarray:
     """(azimuth, elevation) in degrees -> unit Cartesian vector, DCASE convention."""
     az = np.deg2rad(float(az_deg))
@@ -102,9 +83,6 @@ def frame_labels_from_events(
     return [[iv.data for iv in tree[t]] for t in timestamps_ms]
 
 
-# --------------------------------------------------------------------------- #
-# contiguous chunks out of the cached memmap
-# --------------------------------------------------------------------------- #
 @dataclass
 class FileSpan:
     """A contiguous run of frames belonging to one audio file inside the memmap."""
@@ -213,10 +191,6 @@ class SELDSequenceEmbeddingDataset(Dataset):
             shape=dim,
         )
         if in_memory:
-            # np.asarray does NOT copy an ndarray subclass - memmap is one, so
-            # asarray returns a base-class view still backed by the file. That
-            # silently made in_memory a no-op and passed the memmap's read-only
-            # flag through to torch.from_numpy. np.array copies.
             nbytes = int(np.prod(dim)) * 4
             print(f"[seld] loading {split_name} embeddings into RAM: "
                   f"{nbytes / 1e9:.2f} GB", flush=True)
@@ -250,8 +224,6 @@ class SELDSequenceEmbeddingDataset(Dataset):
 
     @property
     def rng(self) -> np.random.Generator:
-        """Lazy per-worker RNG. torch.initial_seed() differs per worker and per
-        epoch, so forked workers don't all draw identical crops."""
         if self._rng is None:
             self._rng = np.random.default_rng(torch.initial_seed() % (2**32))
         return self._rng
@@ -297,12 +269,6 @@ class SELDSequenceEmbeddingDataset(Dataset):
         ts = np.zeros(self.seq_len, dtype=np.float64)
         ts[:take] = span.timestamps[off : off + take]
 
-        # Two masks, because they live at different rates once pool_factor > 1:
-        #   input_mask (seq_len,)          - for the head's attention, which runs
-        #                                    before temporal pooling
-        #   mask       (seq_len // p,)     - for the loss, timestamps and scoring,
-        #                                    which are at the head's output rate
-        # They are the same tensor when pool_factor == 1.
         input_mask = mask.clone()
         y, mask, ts = self._pool(y, mask, ts)
         return {

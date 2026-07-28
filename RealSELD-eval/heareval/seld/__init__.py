@@ -1,10 +1,3 @@
-"""Sequence-aware SELD (single-ACCDOA) evaluation for hear-eval-kit.
-
-If something fails oddly, check the files are all from one revision:
-
-    python3 -m heareval.seld.selfcheck
-"""
-
 from .data import (  # noqa: F401
     SELDSequenceEmbeddingDataset,
     accdoa_targets,

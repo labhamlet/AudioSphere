@@ -1,25 +1,3 @@
-"""
-Temporal ACCDOA heads for hear-eval-kit SELD evaluation.
-
-The DCASE SELDnet head is, structurally: conv stack -> BiGRU -> multi-head
-self-attention -> FC -> ACCDOA. A HEAR encoder has already done the conv stack's
-job, so this head starts at the frequency-patch axis and works down.
-
-Shape flow, matching AudioSphereSELD:
-
-    (B, T, F*D)   raw AudioSphere output, e.g. 8 patches x 768 = 6144
-      |  frequency pooling (attention over the F patches, or mean, or none)
-    (B, T, D)
-      |  projection block: LayerNorm -> Linear -> GELU -> Dropout
-    (B, T, P)
-      |  BiGRU, merged by concat or SELDnet's multiplicative gating
-    (B, T, H)
-      |  MHSA blocks, residual + LayerNorm
-      |  optional temporal average pooling to the label grid
-      |  Linear -> tanh
-    (B, T', nlabels, 3)
-"""
-
 from __future__ import annotations
 
 from typing import Optional
@@ -43,11 +21,6 @@ class FrequencyPool(nn.Module):
     mode="mean": unweighted average. Cheaper, no parameters, a reasonable
         control to run against attention.
     mode="none": pass through untouched, for encoders that already pool.
-
-    NOTE: the reshape assumes the flattened axis is patch-major, i.e.
-    [f0_d0..f0_dD, f1_d0..], which is what AudioSphereSELD._freq_pool assumes.
-    If a future encoder flattens dim-major instead, this silently scrambles -
-    the divisibility assert cannot catch that.
     """
 
     def __init__(self, in_dim: int, embed_dim: int, mode: str = "attention"):
@@ -161,9 +134,6 @@ class ACCDOAHead(nn.Module):
         if hidden_dim % 2:
             raise ValueError("hidden_dim must be even (bidirectional GRU)")
         if attn_layers and hidden_dim % attn_heads:
-            # Only a constraint when there is attention to run. Checking it
-            # unconditionally blocks attn_layers=0 with an odd hidden_dim, which
-            # is a legitimate configuration (pure recurrent head).
             raise ValueError(
                 f"hidden_dim ({hidden_dim}) must be divisible by attn_heads "
                 f"({attn_heads}) when attn_layers > 0"
@@ -183,14 +153,6 @@ class ACCDOAHead(nn.Module):
         self.gru_merge = gru_merge
         self.bounded = bounded
 
-        # ---- frequency pooling -------------------------------------------- #
-        # "pre_pool"  normalises the flattened F*D vector before pooling, which
-        #             is AudioSphereSELD.input_norm.
-        # "post_pool" normalises the pooled token instead, which is the
-        #             LayerNorm at the head of proj_gru.
-        # "both"      does both - input_norm AND proj_gru's LayerNorm, which is
-        #             AudioSphereSELD with proj_gru uncommented.
-        # "none"      neither.
         self.pre_norm = (
             nn.LayerNorm(in_dim) if norm_position in ("pre_pool", "both")
             else nn.Identity()
@@ -202,10 +164,6 @@ class ACCDOAHead(nn.Module):
             else nn.Identity()
         )
 
-        # ---- projection block --------------------------------------------- #
-        # use_projection=False feeds the pooled token straight to the GRU, as
-        # AudioSphereSELD does. True adds LayerNorm -> Linear -> GELU -> Dropout,
-        # which is usually better but is an extra block the baseline lacks.
         if use_projection:
             proj_dim = proj_dim or hidden_dim
             self.proj = nn.Sequential(
@@ -219,7 +177,6 @@ class ACCDOAHead(nn.Module):
             self.proj = post_norm
             gru_in = token_dim
 
-        # ---- recurrence ---------------------------------------------------- #
         gru_hidden = hidden_dim if gru_merge == "gate" else hidden_dim // 2
         self.gru = nn.GRU(
             gru_in,
@@ -230,17 +187,11 @@ class ACCDOAHead(nn.Module):
             dropout=dropout if gru_layers > 1 else 0.0,
         )
 
-        # ---- attention and output ------------------------------------------ #
         self.attn_blocks = nn.ModuleList(
             _AttentionBlock(hidden_dim, attn_heads, dropout) for _ in range(attn_layers)
         )
-        # AudioSphereSELD has no dropout between the attention stack and the
-        # FNN head. out_dropout=0.0 removes it for parity; None keeps `dropout`.
         self.dropout = nn.Dropout(dropout if out_dropout is None else out_dropout)
 
-        # ---- FNN stack ------------------------------------------------------ #
-        # SeldModel / AudioSphereSELD apply these with NO activation between
-        # them - only the final tanh. Reproduced as-is rather than "fixed".
         fnn_size = fnn_size or hidden_dim
         width = hidden_dim
         fnn = []
@@ -270,10 +221,6 @@ class ACCDOAHead(nn.Module):
         key_padding = None
         if mask is not None and self.attn_blocks:
             if mask.shape[1] != h.shape[1]:
-                # A mask at the head's OUTPUT rate was passed where the input
-                # rate is needed. Attention runs before temporal pooling, so it
-                # needs one entry per input frame. Expand rather than fail
-                # inside MultiheadAttention with an opaque shape assertion.
                 if h.shape[1] % mask.shape[1] == 0:
                     mask = mask.repeat_interleave(h.shape[1] // mask.shape[1], dim=1)
                 else:
@@ -282,7 +229,6 @@ class ACCDOAHead(nn.Module):
                         f"input has {h.shape[1]}; pass input_mask, not mask"
                     )
             key_padding = mask < 0.5  # True == ignore
-            # A fully-padded row makes softmax produce NaNs; keep one frame alive.
             all_pad = key_padding.all(dim=1)
             if all_pad.any():
                 key_padding = key_padding.clone()
@@ -302,8 +248,6 @@ class ACCDOAHead(nn.Module):
         h = self.out(h)
         if self.bounded:
             h = torch.tanh(h)
-        # (B, T, C, 3): heareval's get_accdoa_labels indexes per class and reads
-        # the trailing axis as x, y, z.
         return h.reshape(h.shape[0], h.shape[1], self.nlabels, 3)
 
 

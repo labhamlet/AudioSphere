@@ -1,19 +1,3 @@
-"""
-Multi-ACCDOA inference: turn N predicted tracks per class into DCASE events.
-
-Ported from the track-unification block in `train_seldnet.test_epoch`, with the
-same `thresh_unify` semantics. The output structure matches
-`heareval.predictions.get_accdoa_events` exactly - `{filename: {frame_idx:
-[[class, 0, x, y, z, 0], ...]}}` - so the scoring path is shared with the
-single-ACCDOA head.
-
-Why unification is needed: nothing stops two tracks converging on the same
-source. Emitting both would count as one true positive and one false positive.
-So tracks closer than `thresh_unify` degrees are treated as duplicates of one
-source and averaged; tracks further apart are kept as genuinely distinct
-sources, which is what buys multi-ACCDOA its same-class recall.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -63,7 +47,6 @@ def _decode_file(
             "three; a different count needs its own unification rule."
         )
 
-    # (n_tracks, T, 3, C) and per-track activity (n_tracks, T, C)
     doa = np.stack([frames[:, 3 * k: 3 * (k + 1), :] for k in range(3)], axis=0)
     sed = np.linalg.norm(doa, axis=2) > 0.5
 
@@ -101,44 +84,6 @@ def _decode_file(
                         emit(f, c, doa[1, f, :, c])
                     emit(f, c, (doa[2, f, :, c] + doa[0, f, :, c]) / 2)
             else:
-                # Two or three pairs similar: all three describe one source.
                 emit(f, c, (doa[0, f, :, c] + doa[1, f, :, c] + doa[2, f, :, c]) / 3)
 
     return out
-
-
-def multi_accdoa_events(
-    predictions: torch.Tensor,
-    filenames: Sequence[str],
-    timestamps: Sequence[float],
-    nb_classes: int,
-    thresh_unify: float = 15.0,
-) -> Tuple[Dict[str, Dict[int, List[List[float]]]], float, Dict[str, int]]:
-    """
-    Drop-in counterpart to `heareval.predictions.get_accdoa_events`.
-
-    predictions : (N, n_tracks*3, C) over frames from possibly several files
-    Returns (event_dict, mean_timestamp_spacing, max_frame_index_per_file).
-    """
-    per_file: Dict[str, Dict[float, torch.Tensor]] = {}
-    for idx, (filename, timestamp) in enumerate(zip(filenames, timestamps)):
-        slug = Path(filename).name
-        per_file.setdefault(slug, {})[float(timestamp)] = predictions[idx]
-
-    event_dict: Dict[str, Dict[int, List[List[float]]]] = {}
-    max_frames: Dict[str, int] = {}
-    diffs: List[float] = []
-
-    for slug, by_time in per_file.items():
-        times = sorted(by_time)
-        frames = np.stack([by_time[t].detach().cpu().numpy() for t in times])
-        event_dict[slug] = _decode_file(frames, nb_classes, thresh_unify)
-        max_frames[slug] = len(times) - 1
-        if len(times) > 1:
-            diffs.append(float(np.mean(np.diff(np.asarray(times)))))
-
-    # get_accdoa_events reports the spacing of whichever file it saw last; the
-    # median across files is the same number when the grid is uniform and more
-    # robust when it is not.
-    diff = float(np.median(diffs)) if diffs else 0.0
-    return event_dict, diff, max_frames

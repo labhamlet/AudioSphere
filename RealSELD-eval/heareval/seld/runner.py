@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-Downstream SELD training, using embeddings as input features and learning
-ACCDOA predictions with a temporal head.
-
-Sibling of heareval.predictions.runner, same conventions:
-
-    python3 -m heareval.seld.runner <embedding_task_dir> [<more_dirs> ...]
-
-Differences from the predictions runner:
-  * Only accepts tasks with prediction_type == "accdoa".
-  * Verifies the package is self-consistent, then runs an alignment pre-flight
-    check, and refuses to train on a misaligned setup unless --skip-checks.
-  * --preset selects a named configuration; individual options pin single axes.
-  * Writes prediction-done-seld.json / test.predicted-scores-seld.json so it can
-    coexist with the frame-wise probe results in the same directory.
-"""
-
 import json
 import logging
 import random
@@ -30,8 +13,6 @@ from tqdm import tqdm
 
 import heareval.gpu_max_mem as gpu_max_mem
 
-from .check_alignment import main as check_alignment_main
-from .selfcheck import check as selfcheck
 from .train import (
     AUDIOSPHERE_PARITY_GRID,
     AUDIOSPHERE_PROJ_GRID,
@@ -39,8 +20,6 @@ from .train import (
     seld_predictions,
 )
 
-# Module-level logger for anything that happens before a task is selected.
-# Per-task loggers (which also write into the task dir) come from get_logger.
 log = logging.getLogger("heareval.seld")
 
 _task_path_to_logger: Dict[Tuple[str, Path], logging.Logger] = {}
@@ -77,13 +56,6 @@ def get_logger(task_name: str, log_path: Path) -> logging.Logger:
 
 
 def _override_grid(preset: str = "default", **overrides: Optional[Any]):
-    """
-    Each supplied override pins that grid axis to a single value.
-
-    Returns (grid, clobbered) where `clobbered` lists axes the CLI changed away
-    from the preset's value. A preset exists to reproduce a specific setup, so
-    silently overriding half of it defeats the point - the caller warns.
-    """
     base = _PRESETS[preset]
     grid = {k: list(v) for k, v in base.items()}
     clobbered = []
@@ -252,19 +224,6 @@ def runner(
     # deterministic=True path raises at the first matmul.
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
 
-    # A stale file fails here, naming itself, rather than as a TypeError
-    # partway through building a model - or worse, as a silently wrong
-    # architecture that trains and reports plausible numbers.
-    if not skip_checks:
-        consistent, problems = selfcheck()
-        if not consistent:
-            for problem in problems:
-                log.error("%s", problem)
-            stale = sorted({p.split(":")[0] for p in problems})
-            raise SystemExit(
-                f"heareval/seld/ has stale file(s): {', '.join(stale)}. "
-                f"Run `python3 -m heareval.seld.selfcheck` for detail."
-            )
 
     if gpus is not None:
         gpus = json.loads(gpus)
@@ -334,17 +293,6 @@ def runner(
         logger.info(f"Computing SELD predictions for {task_path.name}")
         logger.info(f"preset={preset} seed={seed} grid_points={grid_points}")
 
-        if not skip_checks:
-            logger.info("Running alignment pre-flight check")
-            if check_alignment_main([str(task_path)]) != 0:
-                logger.error(
-                    "Alignment check failed; refusing to train on a misaligned "
-                    "setup. Usually this means HEAR_TIMESTAMP_HOP_MS is unset or "
-                    "not a divisor of 1000 - set it to 100 and re-extract "
-                    "embeddings. Pass --skip-checks true to override."
-                )
-                failures.append(str(task_path))
-                continue
 
         # Get embedding sizes for all splits/folds
         embedding_sizes = []

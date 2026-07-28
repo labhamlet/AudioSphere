@@ -1,13 +1,3 @@
-"""
-SELD entry points, mirroring `heareval.predictions.task_predictions` but
-sequence-aware.
-
-    from heareval.seld.train import seld_predictions
-
-Both reuse the kit's `available_scores["SELD"]`, its task metadata, and its
-split logic, so results sit next to the existing probe results.
-"""
-
 from __future__ import annotations
 
 import gc
@@ -68,10 +58,6 @@ SELD_PARAM_GRID: Dict[str, List[Any]] = {
     "optim": [torch.optim.Adam],
 }
 
-
-# Reproduction of AudioSphereSELD (seldnet_model.py) with parameters.py, mapped
-# onto this head. One point, no search - a grid search would defeat the purpose.
-# This targets AudioSphereSELD, NOT the CNN SeldModel baseline.
 AUDIOSPHERE_PARITY_GRID: Dict[str, List[Any]] = {
     # AudioSphereSELD: LayerNorm(F*D) -> attention freq pool -> GRU directly.
     "freq_pool": ["attention"],
@@ -101,20 +87,13 @@ AUDIOSPHERE_PARITY_GRID: Dict[str, List[Any]] = {
     "batch_size": [128],
     "lr": [1e-3],
     "max_epochs": [100],
-    # parameters.py sets patience=nb_epochs, so early stopping never fires.
-    # Validate every epoch: the repo selects the best epoch by val SELD, and
-    # checking every 25th would leave only four candidates out of a hundred.
     "patience": [100],
     "check_val_every_n_epoch": [1],
-    # cls_data_generator tiles sequences; it does not random-crop.
     "random_crop": [False],
     "optim": [torch.optim.Adam],
 }
 
 
-# AudioSphereSELD with proj_gru enabled: input_norm(F*D) -> attention freq pool
-# -> LayerNorm(768) -> Linear(768, 256) -> GELU -> Dropout -> GRU(256, 128).
-# Everything else matches the parity preset.
 AUDIOSPHERE_PROJ_GRID: Dict[str, List[Any]] = {
     **{k: list(v) for k, v in AUDIOSPHERE_PARITY_GRID.items()},
     "norm_position": ["both"],
@@ -241,7 +220,6 @@ def _trainer(conf: Dict[str, Any], gpus, log_dir: Path, deterministic: bool,
     return trainer, checkpoint
 
 
-# --------------------------------------------------------------------------- #
 def seld_predictions(
     embedding_path: Path,
     embedding_size: int,
@@ -279,12 +257,6 @@ def seld_predictions(
     test_events, test_ts = _reference_frames(embedding_path, metadata, split["test"])
 
     def make_loader(conf, names, *, train: bool):
-        # eval_seq_len decouples the inference chunk length from the training
-        # one. seq_len sets both by default, which confounds a seq_len ablation:
-        # a longer chunk means fewer frames sit at a boundary with no left
-        # context (5% at 20, 1.7% at 60), so longer windows look better at test
-        # time whether or not the training benefited. Evaluating every arm at
-        # one fixed length separates the two.
         seq_len = (
             conf["seq_len"] if train
             else int(conf.get("eval_seq_len") or conf["seq_len"])
@@ -295,12 +267,6 @@ def seld_predictions(
             seq_hop=None,                  # tiling stride == seq_len
             pool_factor=conf["pool_factor"],
             in_memory=in_memory,
-            # Random crops for train: free augmentation, same epoch size. Exact
-            # tiling for val/test regardless, so every timestamp is covered
-            # exactly once - duplicates are silently dropped by the
-            # timestamp-keyed dict inside get_accdoa_events.
-            # conf["random_crop"] must be honoured here: the reproduction
-            # presets set it False because cls_data_generator tiles.
             random_crop=train and bool(conf.get("random_crop", True)),
         )
         return DataLoader(
@@ -353,10 +319,6 @@ def seld_predictions(
         if checkpoint.best_model_score is None:
             logger.warning("Grid point %d produced no validation score; skipping", i + 1)
             continue
-        # Keep only the score, the conf and the checkpoint path. A fitted
-        # Trainer holds its dataloaders, which hold the in-memory embeddings -
-        # about 7 GB per grid point on tau-scale data. Retaining five of them
-        # to pick a winner is a straightforward way to run out of RAM.
         results.append({
             "score": float(checkpoint.best_model_score),
             "conf": conf,
@@ -402,8 +364,6 @@ def seld_predictions(
         "seed": seed,
         "tag": tag,
     })
-    # Suffix so a sweep does not overwrite itself: --tag for ablations,
-    # --seed for repeats.
     suffix = (f"-{tag}" if tag else "") + ("" if seed == 42 else f"-seed{seed}")
     embedding_path.joinpath(f"test.predicted-scores-seld{suffix}.json").write_text(
         json.dumps(test_results, indent=4)

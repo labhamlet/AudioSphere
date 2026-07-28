@@ -1,26 +1,3 @@
-"""
-Per-epoch diagnostics, mirroring what train_seldnet.py prints.
-
-Two tables:
-
-* ACCDOA magnitude range per class. Detection is `||v|| > 0.5`, so if the max
-  magnitude for every class sits below that, SED output is empty and every
-  metric downstream is vacuous - ER 1.0, F 0.0, LE 180, LR 0.0 - which looks
-  like a modelling failure rather than the collapsed-output problem it is.
-  Early in training a bounded (tanh) head starts near zero and has to grow into
-  the threshold; watching the max climb past 0.5 tells you it is happening.
-
-* Classwise ER / F / LE / LR / SELD, i.e. the `classwise_results` array that
-  `SELDMetrics.compute_seld_scores()` builds under `average="macro"`. The macro
-  average hides a lot: one class with LR near zero drags the mean while the rest
-  are fine, and you cannot see that from the scalar.
-
-The kit's SELD ScoreFunction computes the classwise array and, in most
-checkouts, discards it. `recover_classwise` tries several ways to get it back
-and returns None rather than raising if it cannot - see PATCHES.md for the
-one-line change to score.py that makes it deterministic.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -40,24 +17,17 @@ __all__ = [
     "format_classwise_table",
 ]
 
-# Attributes a ScoreFunction might stash the classwise array on directly.
 _CLASSWISE_ATTRS = (
     "classwise_results",
     "_classwise_results",
     "classwise_scores",
     "_classwise_scores",
 )
-# Attributes that might hold a SELDMetrics instance we can re-query.
 _METRICS_ATTRS = ("seld_metrics", "_seld_metrics", "metrics", "_metrics")
 
 _ROW_NAMES = ("ER", "F", "LE", "LR", "SELD")
 
-# Filled by the hook below, which wraps SELDMetrics.compute_seld_scores so the
-# classwise array is captured no matter what the ScoreFunction does with it.
 _LAST_CLASSWISE: Dict[str, Any] = {"value": None}
-# The accumulator state behind the scores. ER = (S+D+I)/Nref, so when ER reads 0
-# these counters say immediately whether the reference side was empty or the
-# model simply detected nothing.
 _LAST_COUNTS: Dict[str, Any] = {"value": None}
 _COUNTER_ATTRS = ("_Nref", "_TP", "_FP", "_FP_spatial", "_FN",
                   "_DE_TP", "_DE_FP", "_DE_FN", "_S", "_D", "_I")
@@ -65,18 +35,6 @@ _HOOK_STATE: Dict[str, Any] = {"installed": False, "target": None}
 
 
 def install_classwise_hook() -> Optional[str]:
-    """
-    Capture the classwise array without editing heareval/score.py.
-
-    `SELDMetrics.compute_seld_scores()` returns it as its last element and the
-    ScoreFunction usually drops it on the floor. Rather than ask you to patch
-    that file, wrap the method on the class itself: every instance the score
-    function builds resolves the method through the class, so this works
-    retroactively and regardless of how the score function is written.
-
-    Returns the module path it patched, or None if SELDMetrics was not found.
-    Idempotent.
-    """
     if _HOOK_STATE["installed"]:
         return _HOOK_STATE["target"]
 
@@ -98,11 +56,6 @@ def install_classwise_hook() -> Optional[str]:
         def wrapped(self, _original=original):
             result = _original(self)
             try:
-                # Capture regardless of Nref. heareval's SELD._compute builds
-                # exactly one SELDMetrics per call, so a degenerate result is
-                # the real one and needs explaining, not hiding. The guard that
-                # matters is the cross-check against the reported score in
-                # recover_classwise.
                 classwise = np.asarray(result[-1])
                 if classwise.ndim == 2:
                     _LAST_CLASSWISE["value"] = classwise
@@ -136,19 +89,11 @@ def accdoa_magnitude_range(prediction: torch.Tensor) -> Tuple[np.ndarray, np.nda
 
 
 def reset_classwise() -> None:
-    """Drop any captured state so a stale epoch cannot leak into the next one."""
     _LAST_CLASSWISE["value"] = None
     _LAST_COUNTS["value"] = None
 
 
 def format_counts(prefix: str = "  ") -> Optional[str]:
-    """
-    What the metric actually accumulated, if the hook captured it.
-
-    ER = (S + D + I) / (Nref.sum() + eps), F = TP / (TP + FP_spatial +
-    0.5*(FP + FN)), LR = DE_TP / (DE_TP + DE_FN). Printing the counters makes
-    every score traceable to integers instead of a number to be squinted at.
-    """
     counts = _LAST_COUNTS.get("value")
     if counts is None:
         return None
@@ -243,18 +188,6 @@ def format_magnitude_table(
 
 
 def is_degenerate(classwise: np.ndarray) -> bool:
-    """
-    True when the row cannot describe a real evaluation.
-
-    ER = (S + D + I) / (Nref.sum() + eps). With references present and nothing
-    detected, every reference is a deletion, so D = Nref and ER = 1. ER = 0
-    says there were no deletions - every reference was matched - while LR = 0
-    says none was. The two can only hold together when Nref = 0, i.e. no ground
-    truth reached the metric.
-
-    So this is never a legitimate score, however self-consistent it looks
-    against the reported aggregate. Both are wrong together.
-    """
     return bool(np.allclose(classwise[0], 0.0) and np.allclose(classwise[3], 0.0))
 
 

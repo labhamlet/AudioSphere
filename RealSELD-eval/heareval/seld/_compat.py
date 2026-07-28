@@ -1,14 +1,3 @@
-"""
-Resolve hear-eval-kit symbols regardless of how the package is laid out.
-
-`python -m heareval.predictions.runner` means `heareval.predictions` is a
-package, so the scoring helpers live in `heareval.predictions.task_predictions`
-and are only importable as `heareval.predictions.X` if `__init__.py` re-exports
-them. Some checkouts do, some don't. Rather than guess, look each symbol up
-across the plausible modules and fail with a message that says what was missing
-and where it was looked for.
-"""
-
 from __future__ import annotations
 
 from importlib import import_module
