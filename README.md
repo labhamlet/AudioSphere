@@ -1,6 +1,6 @@
 # AudioSphere : General-purpose audio representation model Transformer
 
-This repository contains the implementation of AudioSphere, a state-of-the-art audio processing model trained on AudioSet with naturalistic scenes. It includes the listen-eval-kit, an extended fork of hear-eval-kit with enhanced functionality for sound localization tasks. The framework leverages PyTorch Lightning and Hydra with TensorBoard logging for comprehensive hyperparameter optimization.
+This repository contains the implementation of AudioSphere, a state-of-the-art audio processing model trained on AudioSet with naturalistic scenes. It includes the RealSELD-eval, an extended fork of hear-eval-kit with enhanced functionality for sound localization tasks. The framework leverages PyTorch Lightning and Hydra with TensorBoard logging for comprehensive hyperparameter optimization.
 
 ## System Requirements
 
@@ -50,7 +50,7 @@ python3 train.py data=audioset data.sr=32000 patching=frame data.mask_patch=100 
 #### Feature Extraction and Evaluation
 
 ```bash
-cd listen-eval-kit
+cd RealSELD-eval
 
 # Define environment variables
 embeddings_dir=/path/to/save/embeddings
